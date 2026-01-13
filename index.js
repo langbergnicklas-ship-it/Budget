@@ -9,12 +9,10 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// 1. DATABASE CONNECTION
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// 2. DATA MODELS
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -29,13 +27,11 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// Payday logic (weekend-adjusted)
 function getActualPayday(targetDay) {
   let now = new Date();
   let payday = new Date(now.getFullYear(), now.getMonth(), targetDay);
-  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2); // Söndag -> Fredag
-  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1); // Lördag -> Fredag
-  
+  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   if (new Date() >= payday.setHours(23, 59, 59)) {
     payday = new Date(now.getFullYear(), now.getMonth() + 1, targetDay);
     if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
@@ -44,7 +40,6 @@ function getActualPayday(targetDay) {
   return payday;
 }
 
-// 3. API ROUTES
 app.get("/api/overview", async (req, res) => {
   let user = await User.findOne();
   if (!user) user = await User.create({});
@@ -95,44 +90,48 @@ app.delete("/api/delete-transaction/:id", async (req, res) => {
   res.json({ success: true });
 });
 
-// 4. FRONTEND UI
 app.get("/", (req, res) => {
   res.send(`
+    <!DOCTYPE html>
     <html>
       <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Budget</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2489/2489756.png">
         <style>
-          body { font-family: sans-serif; text-align: center; padding: 20px; background: #f0f2f5; }
-          .card { background: white; padding: 25px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 400px; margin: auto; }
-          h1 { font-size: 50px; margin: 10px 0; color: #2ecc71; }
-          .label { color: #8a8d91; text-transform: uppercase; font-size: 10px; font-weight: bold; }
-          .section { margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px; }
-          input { padding: 12px; border: 1px solid #ddd; border-radius: 10px; width: 100%; margin-bottom: 8px; box-sizing: border-box; font-size: 16px; }
-          button { padding: 12px; background: #0084ff; color: white; border: none; border-radius: 10px; font-weight: bold; width: 100%; cursor: pointer; }
-          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; text-align: left; font-size: 14px; }
-          .undo-btn { background: #ff4d4d; color: white; padding: 5px 10px; font-size: 10px; width: auto; border-radius: 5px; border: none; }
+          body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; padding: 20px; background: #f0f2f5; margin: 0; }
+          .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 400px; margin: auto; }
+          h1 { font-size: 55px; margin: 10px 0; color: #2ecc71; letter-spacing: -2px; }
+          .label { color: #8a8d91; text-transform: uppercase; font-size: 11px; font-weight: bold; letter-spacing: 1px; }
+          .section { margin-top: 25px; border-top: 1px solid #f0f0f0; padding-top: 20px; }
+          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background: #fafafa; }
+          button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; transition: 0.2s; }
+          button:active { transform: scale(0.98); opacity: 0.9; }
+          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f9f9f9; text-align: left; }
+          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 8px 12px; font-size: 11px; width: auto; border-radius: 8px; }
         </style>
       </head>
       <body>
         <div class="card">
-          <p class="label">Du kan spendera idag</p>
+          <p class="label">Kvar att spendera idag</p>
           <h1 id="daily">...</h1>
           <p id="stats" style="font-size: 14px; color: #4b4b4b; margin-bottom: 10px;"></p>
 
           <div class="section">
             <p class="label">Ny utgift</p>
             <input type="text" id="desc" placeholder="Vad köpte du?">
-            <input type="number" id="amt" placeholder="Belopp (kr)">
+            <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
             <button onclick="saveAction('/api/spend', 'amount')">Spara köp</button>
           </div>
 
           <div class="section">
             <p class="label">Inställningar</p>
-            <input type="number" id="newBudget" placeholder="Sätt ny totalbudget">
+            <input type="number" id="newBudget" placeholder="Totalbudget">
             <button onclick="saveAction('/api/set-budget', 'budget')" style="background:#27ae60; margin-bottom: 10px;">Uppdatera budget</button>
-            
-            <input type="number" id="newPayday" placeholder="Ändra lönedag (t.ex. 27)">
-            <button onclick="saveAction('/api/set-payday', 'payday')" style="background:#8e44ad">Spara ny lönedag</button>
+            <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
+            <button onclick="saveAction('/api/set-payday', 'payday')" style="background:#8e44ad">Sätt lönedag</button>
           </div>
 
           <div class="section" style="text-align: left;">
@@ -146,14 +145,14 @@ app.get("/", (req, res) => {
             const res = await fetch('/api/overview');
             const data = await res.json();
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
-            document.getElementById('stats').innerHTML = '<b>' + data.remainingBudget + ' kr</b> kvar totalt<br>Nästa lön: ' + data.paydayDate + ' (den ' + data.targetPayday + ':e)';
+            document.getElementById('stats').innerHTML = '<b>' + data.remainingBudget + ' kr</b> kvar totalt<br>Lön: ' + data.paydayDate;
             
             const list = document.getElementById('list');
             list.innerHTML = '';
             data.transactions.slice().reverse().forEach(t => {
               const item = document.createElement('div');
               item.className = 'history-item';
-              item.innerHTML = '<div>' + t.description + ' (-' + t.amount + ' kr)<br><small>' + new Date(t.timestamp).toLocaleDateString() + '</small></div>' +
+              item.innerHTML = '<div>' + t.description + ' (-' + t.amount + ' kr)<br><small style="color:#aaa">' + new Date(t.timestamp).toLocaleDateString() + '</small></div>' +
                                 '<button class="undo-btn" onclick="deleteItem(\\'' + t._id + '\\')">Ångra</button>';
               list.appendChild(item);
             });
