@@ -1,65 +1,109 @@
 const express = require("express");
 const cors = require("cors");
+const mongoose = require("mongoose");
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+const MONGODB_URI = process.env.MONGODB_URI;
 
-// Application State
-let userData = {
-  remainingBudget: 12000,
-  targetPayday: 25,
-  transactions: [] 
-};
+// 1. DATABASE CONNECTION
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log("Connected to MongoDB Atlas"))
+  .catch(err => console.error("Database error:", err));
 
-// Logic for weekend-adjusted payday
-function getActualPayday(year, month, targetDay) {
-  let payday = new Date(year, month, targetDay);
-  let dayOfWeek = payday.getDay(); 
-  if (dayOfWeek === 0) payday.setDate(payday.getDate() - 2); 
-  else if (dayOfWeek === 6) payday.setDate(payday.getDate() - 1); 
+// 2. DATA MODELS
+const transactionSchema = new mongoose.Schema({
+  description: String,
+  amount: Number,
+  timestamp: { type: Date, default: Date.now }
+});
+
+const userSchema = new mongoose.Schema({
+  remainingBudget: { type: Number, default: 12000 },
+  targetPayday: { type: Number, default: 25 },
+  transactions: [transactionSchema]
+});
+
+const User = mongoose.model("User", userSchema);
+
+// Payday logic
+function getActualPayday(targetDay) {
+  let now = new Date();
+  let payday = new Date(now.getFullYear(), now.getMonth(), targetDay);
+  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+  if (new Date() >= payday.setHours(23, 59, 59)) {
+    payday = new Date(now.getFullYear(), now.getMonth() + 1, targetDay);
+    if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+    else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+  }
   return payday;
 }
 
-function getBudgetData() {
-  const now = new Date();
-  let payday = getActualPayday(now.getFullYear(), now.getMonth(), userData.targetPayday);
-  if (now >= payday.setHours(23, 59, 59)) {
-    payday = getActualPayday(now.getFullYear(), now.getMonth() + 1, userData.targetPayday);
-  }
-  const diffInMs = payday - now;
-  const daysLeft = Math.max(1, Math.ceil(diffInMs / (1000 * 60 * 60 * 24)));
-  return {
-    dailyLimit: Math.floor(userData.remainingBudget / daysLeft),
+// 3. API ROUTES
+app.get("/api/overview", async (req, res) => {
+  let user = await User.findOne();
+  if (!user) user = await User.create({});
+  
+  const payday = getActualPayday(user.targetPayday);
+  const daysLeft = Math.max(1, Math.ceil((payday - new Date()) / (1000 * 60 * 60 * 24)));
+  
+  res.json({
+    dailyLimit: Math.floor(user.remainingBudget / daysLeft),
     daysLeft,
     paydayDate: payday.toLocaleDateString('sv-SE'),
-    remainingBudget: userData.remainingBudget,
-    transactions: userData.transactions
-  };
-}
+    remainingBudget: user.remainingBudget,
+    transactions: user.transactions
+  });
+});
 
-// --- FRONTEND ---
+app.post("/api/spend", async (req, res) => {
+  const { amount, description } = req.body;
+  const user = await User.findOne();
+  user.remainingBudget -= amount;
+  user.transactions.push({ amount, description });
+  await user.save();
+  res.json({ success: true });
+});
+
+app.post("/api/set-budget", async (req, res) => {
+  const user = await User.findOne();
+  user.remainingBudget = req.body.budget;
+  user.transactions = []; 
+  await user.save();
+  res.json({ success: true });
+});
+
+app.delete("/api/delete-transaction/:id", async (req, res) => {
+  const user = await User.findOne();
+  const tx = user.transactions.id(req.params.id);
+  if (tx) {
+    user.remainingBudget += tx.amount;
+    tx.deleteOne();
+    await user.save();
+  }
+  res.json({ success: true });
+});
+
+// 4. FRONTEND UI
 app.get("/", (req, res) => {
   res.send(`
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-          body { font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #f0f2f5; color: #1c1e21; }
+          body { font-family: sans-serif; text-align: center; padding: 20px; background: #f0f2f5; }
           .container { background: white; padding: 20px; border-radius: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 400px; margin: auto; }
           h1 { font-size: 50px; margin: 10px 0; color: #2ecc71; }
           .label { color: #8a8d91; text-transform: uppercase; font-size: 10px; font-weight: bold; }
           .section { margin-top: 20px; border-top: 1px solid #eee; padding-top: 15px; }
           input { padding: 12px; border: 1px solid #ddd; border-radius: 10px; width: 100%; margin-bottom: 8px; box-sizing: border-box; font-size: 16px; }
           button { padding: 12px; background: #0084ff; color: white; border: none; border-radius: 10px; font-weight: bold; width: 100%; cursor: pointer; margin-bottom: 5px; }
-          .secondary-btn { background: #42b72a; }
-          .delete-btn { background: #ff4d4d; color: white; padding: 4px 8px; font-size: 10px; width: auto; margin: 0; }
+          .undo-btn { background: #ff4d4d; color: white; padding: 5px 10px; font-size: 10px; width: auto; border-radius: 5px; border: none; }
           .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; text-align: left; font-size: 14px; }
-          .history-meta { font-size: 10px; color: #999; }
-          .filters { display: flex; gap: 5px; margin-bottom: 10px; }
-          .filter-btn { background: #e4e6eb; color: #4b4b4b; padding: 5px 10px; font-size: 11px; border-radius: 5px; border: none; width: auto; }
-          .active { background: #0084ff; color: white; }
         </style>
       </head>
       <body>
@@ -69,52 +113,38 @@ app.get("/", (req, res) => {
           <p id="stats" style="font-size: 14px; color: #4b4b4b; margin-bottom: 10px;"></p>
 
           <div class="section">
-            <p class="label">Registrera köp</p>
+            <p class="label">Ny utgift</p>
             <input type="text" id="desc" placeholder="Vad köpte du?">
             <input type="number" id="amt" placeholder="Belopp (kr)">
-            <button onclick="saveAction('/api/spend', 'amount', 'description')">Spara köp</button>
+            <button onclick="saveAction('/api/spend', 'amount')">Spara köp</button>
           </div>
 
           <div class="section">
             <p class="label">Inställningar</p>
             <input type="number" id="newBudget" placeholder="Ny totalbudget">
-            <button class="secondary-btn" onclick="saveAction('/api/set-budget', 'budget')">Sätt ny budget</button>
+            <button onclick="saveAction('/api/set-budget', 'budget')" style="background:#27ae60">Sätt ny budget</button>
           </div>
 
           <div class="section" style="text-align: left;">
             <p class="label">Historik</p>
-            <div class="filters">
-              <button class="filter-btn active" id="f-all" onclick="setFilter('all')">Alla</button>
-              <button class="filter-btn" id="f-week" onclick="setFilter('week')">Vecka</button>
-            </div>
             <div id="list"></div>
           </div>
         </div>
 
         <script>
-          let currentFilter = 'all';
           async function update() {
             const res = await fetch('/api/overview');
             const data = await res.json();
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
             document.getElementById('stats').innerHTML = '<b>' + data.remainingBudget + ' kr</b> kvar totalt<br>Lön: ' + data.paydayDate;
-            render(data.transactions);
-          }
-
-          function render(transactions) {
+            
             const list = document.getElementById('list');
             list.innerHTML = '';
-            let filtered = transactions;
-            if(currentFilter === 'week') {
-              const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-              filtered = transactions.filter(t => new Date(t.timestamp) > weekAgo);
-            }
-            
-            filtered.slice().reverse().forEach(t => {
+            data.transactions.slice().reverse().forEach(t => {
               const item = document.createElement('div');
               item.className = 'history-item';
-              item.innerHTML = '<div>' + t.description + ' (-' + t.amount + ' kr)<br><span class="history-meta">' + new Date(t.timestamp).toLocaleDateString() + '</span></div>' +
-                                '<button class="delete-btn" onclick="deleteItem(\\'' + t.id + '\\')">Ångra</button>';
+              item.innerHTML = '<div>' + t.description + ' (-' + t.amount + ' kr)<br><small>' + new Date(t.timestamp).toLocaleDateString() + '</small></div>' +
+                                '<button class="undo-btn" onclick="deleteItem(\\'' + t._id + '\\')">Ångra</button>';
               list.appendChild(item);
             });
           }
@@ -124,24 +154,15 @@ app.get("/", (req, res) => {
             update();
           }
 
-          function setFilter(f) {
-            currentFilter = f;
-            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            document.getElementById('f-' + f).classList.add('active');
-            update();
-          }
-
-          async function saveAction(route, valKey, descKey = null) {
-            const val = document.getElementById(valKey === 'amount' ? 'amt' : 'newBudget').value;
-            const desc = descKey ? document.getElementById('desc').value : null;
+          async function saveAction(route, key) {
+            const val = document.getElementById(key === 'amount' ? 'amt' : 'newBudget').value;
+            const desc = document.getElementById('desc').value;
             if(!val) return;
-
             await fetch(route, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ [valKey]: Number(val), description: desc || 'Utgift' })
+              body: JSON.stringify({ [key]: Number(val), description: desc || 'Utgift' })
             });
-
             document.getElementById('amt').value = '';
             document.getElementById('desc').value = '';
             document.getElementById('newBudget').value = '';
@@ -154,38 +175,4 @@ app.get("/", (req, res) => {
   `);
 });
 
-// --- API ---
-app.get("/api/overview", (req, res) => res.json(getBudgetData()));
-
-app.post("/api/spend", (req, res) => {
-  const { amount, description } = req.body;
-  userData.remainingBudget -= amount;
-  userData.transactions.push({ 
-    id: Date.now().toString(), // Create a unique ID
-    amount, 
-    description, 
-    timestamp: new Date() 
-  });
-  res.json({ success: true });
-});
-
-app.post("/api/set-budget", (req, res) => {
-  userData.remainingBudget = req.body.budget;
-  userData.transactions = []; 
-  res.json({ success: true });
-});
-
-app.delete("/api/delete-transaction/:id", (req, res) => {
-  const id = req.params.id;
-  const index = userData.transactions.findIndex(t => t.id === id);
-  if (index !== -1) {
-    // Add the money back before deleting
-    userData.remainingBudget += userData.transactions[index].amount;
-    userData.transactions.splice(index, 1);
-    res.json({ success: true });
-  } else {
-    res.status(404).json({ error: "Not found" });
-  }
-});
-
-app.listen(PORT, () => console.log("Running with Undo feature!"));
+app.listen(PORT, () => console.log("Server ready!"));
