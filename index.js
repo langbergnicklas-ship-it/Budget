@@ -41,7 +41,7 @@ app.post("/api/login", async (req, res) => {
     user = await User.create({ username, password });
     return res.json({ success: true });
   }
-  if (!user.password) { // Fix för gamla konton utan lösenord
+  if (!user.password) {
     user.password = password;
     await user.save();
     return res.json({ success: true });
@@ -132,61 +132,91 @@ app.get("/", (req, res) => {
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
         <meta name="apple-mobile-web-app-capable" content="yes">
         <style>
-          body { font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #f0f2f5; margin: 0; }
-          .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 400px; margin: auto; }
-          h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; }
+          body { font-family: -apple-system, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding-bottom: 80px; }
+          .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
+          h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; letter-spacing: -2px; }
           .savings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
           .savings-card { background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 15px; font-weight: bold; font-size: 13px; }
           .progress-container { background: #eee; border-radius: 10px; height: 10px; margin: 15px 0; overflow: hidden; }
           .progress-bar { height: 100%; width: 0%; transition: width 0.5s ease; }
           .section { margin-top: 25px; border-top: 1px solid #f0f0f0; padding-top: 20px; }
-          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; }
+          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background:#f9f9f9; }
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
+          
+          /* Navigering längst ner */
+          .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; display: flex; border-top: 1px solid #eee; padding: 10px 0; padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+          .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; display: flex; flex-direction: column; align-items: center; }
+          .tab-btn.active { color: #0084ff; }
+          .tab-icon { font-size: 20px; margin-bottom: 3px; }
+
+          #loginScreen { display: block; padding-top: 50px; }
+          #mainContent { display: none; }
+          .view { display: none; }
+          .view.active { display: block; }
           .history-item { font-size: 14px; border-bottom: 1px solid #eee; padding: 10px 0; text-align: left; }
-          #loginScreen { display: block; }
-          #appScreen { display: none; }
         </style>
       </head>
       <body>
-        <div id="loginScreen" class="card">
-          <h2 style="margin-bottom:20px">Budget App</h2>
-          <input type="text" id="userIn" placeholder="Användarnamn">
-          <input type="password" id="passIn" placeholder="Lösenord">
-          <button onclick="login()">Logga in / Skapa profil</button>
+        <div id="loginScreen">
+          <div class="card">
+            <h2 style="margin-bottom:20px">Budget App</h2>
+            <input type="text" id="userIn" placeholder="Användarnamn">
+            <input type="password" id="passIn" placeholder="Lösenord">
+            <button onclick="login()">Logga in / Skapa profil</button>
+          </div>
         </div>
 
-        <div id="appScreen" class="card">
-          <div class="savings-grid">
-            <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings">0</span> kr</div>
-            <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
-          </div>
-          
-          <p style="font-size: 11px; font-weight:bold; color:#888">IDAG KAN DU SPENDERA</p>
-          <h1 id="daily">...</h1>
-          <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
-          <p id="stats" style="font-size: 13px; color: #666"></p>
-
-          <div class="section">
-            <p style="font-size: 10px; font-weight:bold; color:#888; margin-bottom:10px">REGISTRERA KÖP</p>
-            <input type="text" id="desc" placeholder="Vad?">
-            <input type="number" id="amt" inputmode="decimal" placeholder="Kr">
-            <button onclick="action('spend', 'amount')">Spara köp</button>
-          </div>
-
-          <div class="section">
-            <p style="font-size: 10px; font-weight:bold; color:#888; margin-bottom:10px">INSTÄLLNINGAR</p>
-            <input type="number" id="newBudget" placeholder="Ny totalbudget">
-            <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 10px;">Sätt budget</button>
-            <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
-            <button onclick="action('set-payday', 'payday')" style="background:#8e44ad">Sätt lönedag</button>
+        <div id="mainContent">
+          <div id="view-home" class="view active">
+            <div class="card">
+              <div class="savings-grid">
+                <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings">0</span> kr</div>
+                <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
+              </div>
+              <p style="font-size: 11px; font-weight:bold; color:#888">IDAG KAN DU SPENDERA</p>
+              <h1 id="daily">...</h1>
+              <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
+              <p id="stats" style="font-size: 13px; color: #666"></p>
+              
+              <div class="section">
+                <input type="text" id="desc" placeholder="Vad?">
+                <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
+                <button onclick="action('spend', 'amount')">Spara köp</button>
+              </div>
+              
+              <div id="list" style="margin-top: 20px;"></div>
+            </div>
           </div>
 
-          <div class="section">
-            <button onclick="archive()" style="background:#f39c12">Avsluta månad & Spara</button>
+          <div id="view-settings" class="view">
+            <div class="card">
+              <h2 style="margin-top:0">Inställningar</h2>
+              <div class="section" style="border:none; padding:0">
+                <p style="font-size: 12px; font-weight:bold; color:#888; text-align:left">MÅNADENS BUDGET</p>
+                <input type="number" id="newBudget" placeholder="Ny totalbudget">
+                <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 20px;">Uppdatera budget</button>
+                
+                <p style="font-size: 12px; font-weight:bold; color:#888; text-align:left">LÖNEDAG</p>
+                <input type="number" id="newPayday" placeholder="Datum (t.ex. 25)">
+                <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom: 30px;">Sätt lönedag</button>
+              </div>
+
+              <div class="section">
+                <p style="font-size: 12px; font-weight:bold; color:#888; text-align:left">ADMINISTRATION</p>
+                <button onclick="archive()" style="background:#f39c12; margin-bottom: 10px;">Avsluta månad & Spara</button>
+                <button onclick="logout()" style="background:#888">Logga ut från profil</button>
+              </div>
+            </div>
           </div>
-          
-          <div id="list" style="margin-top: 20px;"></div>
-          <button onclick="logout()" style="background:none; color:#999; font-size:12px; margin-top:30px">Logga ut</button>
+
+          <div class="tab-bar">
+            <button class="tab-btn active" id="btn-home" onclick="showTab('home')">
+              <span class="tab-icon">🏠</span>Översikt
+            </button>
+            <button class="tab-btn" id="btn-settings" onclick="showTab('settings')">
+              <span class="tab-icon">⚙️</span>Inställningar
+            </button>
+          </div>
         </div>
 
         <script>
@@ -208,13 +238,20 @@ app.get("/", (req, res) => {
               localStorage.setItem('budget_pass', p);
               curUser = u; curPass = p;
               showApp();
-            } else { alert("Fel lösenord eller problem med inloggning."); }
+            } else { alert("Fel inloggning."); }
           }
 
           function showApp() {
             document.getElementById('loginScreen').style.display = 'none';
-            document.getElementById('appScreen').style.display = 'block';
+            document.getElementById('mainContent').style.display = 'block';
             update();
+          }
+
+          function showTab(tab) {
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('view-' + tab).classList.add('active');
+            document.getElementById('btn-' + tab).classList.add('active');
           }
 
           async function update() {
@@ -223,12 +260,10 @@ app.get("/", (req, res) => {
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
             document.getElementById('totalSavings').innerText = data.totalSavings;
             document.getElementById('avgSavings').innerText = data.avgSavings;
-            document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> (av ' + data.initialBudget + ') | Lön: ' + data.paydayDate;
-            
+            document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> | Lön: ' + data.paydayDate;
             const bar = document.getElementById('bar');
             bar.style.width = data.usedPercent + '%';
             bar.style.backgroundColor = data.usedPercent < 50 ? '#2ecc71' : (data.usedPercent < 80 ? '#f1c40f' : '#e74c3c');
-            
             document.getElementById('list').innerHTML = data.transactions.slice(-5).reverse().map(t => 
               '<div class="history-item">' + t.description + ' <span style="float:right; color:#ff4d4d">-' + t.amount + ' kr</span></div>'
             ).join('');
@@ -239,33 +274,29 @@ app.get("/", (req, res) => {
             const val = document.getElementById(inputId).value;
             const desc = document.getElementById('desc').value;
             if(!val) return;
-            
             const body = { description: desc || 'Utgift' };
             if(key === 'amount') body.amount = Number(val);
             if(key === 'budget') body.budget = Number(val);
             if(key === 'payday') body.payday = Number(val);
-
             await fetch('/api/' + type + '/' + curUser + '/' + curPass, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(body)
             });
             document.getElementById(inputId).value = '';
-            if(key === 'amount') document.getElementById('desc').value = '';
             update();
+            if(key !== 'amount') showTab('home'); // Hoppa tillbaka till hemvyn efter inställning
           }
 
           async function archive() {
-            if(confirm("Vill du flytta dina kvarvarande pengar till spargrisen och börja på en ny månad?")) {
+            if(confirm("Spara överskottet och nollställ?")) {
               await fetch('/api/archive-month/' + curUser + '/' + curPass, { method: 'POST' });
               update();
+              showTab('home');
             }
           }
 
-          function logout() {
-            localStorage.clear();
-            location.reload();
-          }
+          function logout() { localStorage.clear(); location.reload(); }
         </script>
       </body>
     </html>
