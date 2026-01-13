@@ -13,7 +13,7 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// 1. SCHEMA MED SPAR-STATISTIK
+// 1. DATA SCHEMA
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -24,7 +24,7 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   totalSavings: { type: Number, default: 0 },
-  monthsArchived: { type: Number, default: 0 }, // Nytt fält för att räkna snittet
+  monthsArchived: { type: Number, default: 0 },
   initialBudget: { type: Number, default: 12000 },
   remainingBudget: { type: Number, default: 12000 },
   targetPayday: { type: Number, default: 25 },
@@ -41,6 +41,11 @@ app.post("/api/login", async (req, res) => {
     user = await User.create({ username, password });
     return res.json({ success: true });
   }
+  if (!user.password) { // Fix för gamla konton utan lösenord
+    user.password = password;
+    await user.save();
+    return res.json({ success: true });
+  }
   if (user.password !== password) return res.status(401).json({ success: false, message: "Fel lösenord!" });
   res.json({ success: true });
 });
@@ -55,12 +60,12 @@ app.get("/api/overview/:username/:password", async (req, res) => {
   else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   if (now >= payday.setHours(23, 59, 59)) {
     payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
+    if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+    else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   }
 
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const usedPercent = Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100));
-  
-  // Räkna ut snittsparande
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
 
   res.json({
@@ -68,23 +73,13 @@ app.get("/api/overview/:username/:password", async (req, res) => {
     daysLeft,
     paydayDate: payday.toLocaleDateString('sv-SE'),
     remainingBudget: user.remainingBudget,
+    initialBudget: user.initialBudget,
+    targetPayday: user.targetPayday,
     totalSavings: user.totalSavings,
-    avgSavings, // Skickar med snittet till frontend
+    avgSavings,
     usedPercent,
     transactions: user.transactions
   });
-});
-
-app.post("/api/archive-month/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
-    user.totalSavings += user.remainingBudget;
-    user.monthsArchived += 1; // Öka antal månader när man sparar
-    user.remainingBudget = user.initialBudget;
-    user.transactions = [];
-    await user.save();
-    res.json({ success: true });
-  }
 });
 
 app.post("/api/spend/:username/:password", async (req, res) => {
@@ -92,6 +87,38 @@ app.post("/api/spend/:username/:password", async (req, res) => {
   if (user) {
     user.remainingBudget -= req.body.amount;
     user.transactions.push({ amount: req.body.amount, description: req.body.description });
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/set-budget/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.initialBudget = req.body.budget;
+    user.remainingBudget = req.body.budget;
+    user.transactions = [];
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/set-payday/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.targetPayday = req.body.payday;
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/archive-month/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.totalSavings += user.remainingBudget;
+    user.monthsArchived += 1;
+    user.remainingBudget = user.initialBudget;
+    user.transactions = [];
     await user.save();
     res.json({ success: true });
   }
@@ -115,9 +142,9 @@ app.get("/", (req, res) => {
           .section { margin-top: 25px; border-top: 1px solid #f0f0f0; padding-top: 20px; }
           input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; }
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
+          .history-item { font-size: 14px; border-bottom: 1px solid #eee; padding: 10px 0; text-align: left; }
           #loginScreen { display: block; }
           #appScreen { display: none; }
-          .history-item { font-size: 14px; border-bottom: 1px solid #eee; padding: 10px 0; text-align: left; }
         </style>
       </head>
       <body>
@@ -130,27 +157,36 @@ app.get("/", (req, res) => {
 
         <div id="appScreen" class="card">
           <div class="savings-grid">
-            <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings" style="font-size:18px">0</span> kr</div>
-            <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/månad<br><span id="avgSavings" style="font-size:18px">0</span> kr</div>
+            <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings">0</span> kr</div>
+            <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
           </div>
           
-          <p style="font-size: 11px; font-weight:bold; color:#888; letter-spacing:1px">IDAG KAN DU GÖRA AV MED</p>
+          <p style="font-size: 11px; font-weight:bold; color:#888">IDAG KAN DU SPENDERA</p>
           <h1 id="daily">...</h1>
           <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
           <p id="stats" style="font-size: 13px; color: #666"></p>
 
           <div class="section">
-            <input type="text" id="desc" placeholder="Vad har du köpt?">
-            <input type="number" id="amt" inputmode="decimal" placeholder="Belopp i kr">
-            <button onclick="action('spend')">Spara köp</button>
+            <p style="font-size: 10px; font-weight:bold; color:#888; margin-bottom:10px">REGISTRERA KÖP</p>
+            <input type="text" id="desc" placeholder="Vad?">
+            <input type="number" id="amt" inputmode="decimal" placeholder="Kr">
+            <button onclick="action('spend', 'amount')">Spara köp</button>
           </div>
 
           <div class="section">
-            <button onclick="archive()" style="background:#27ae60">Avsluta månad & Spara</button>
+            <p style="font-size: 10px; font-weight:bold; color:#888; margin-bottom:10px">INSTÄLLNINGAR</p>
+            <input type="number" id="newBudget" placeholder="Ny totalbudget">
+            <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 10px;">Sätt budget</button>
+            <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
+            <button onclick="action('set-payday', 'payday')" style="background:#8e44ad">Sätt lönedag</button>
+          </div>
+
+          <div class="section">
+            <button onclick="archive()" style="background:#f39c12">Avsluta månad & Spara</button>
           </div>
           
           <div id="list" style="margin-top: 20px;"></div>
-          <button onclick="logout()" style="background:none; color:#999; font-size:12px; margin-top:30px">Logga ut från profil</button>
+          <button onclick="logout()" style="background:none; color:#999; font-size:12px; margin-top:30px">Logga ut</button>
         </div>
 
         <script>
@@ -187,7 +223,7 @@ app.get("/", (req, res) => {
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
             document.getElementById('totalSavings').innerText = data.totalSavings;
             document.getElementById('avgSavings').innerText = data.avgSavings;
-            document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> | Lön: ' + data.paydayDate;
+            document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> (av ' + data.initialBudget + ') | Lön: ' + data.paydayDate;
             
             const bar = document.getElementById('bar');
             bar.style.width = data.usedPercent + '%';
@@ -198,17 +234,24 @@ app.get("/", (req, res) => {
             ).join('');
           }
 
-          async function action(type) {
-            const amt = document.getElementById('amt').value;
+          async function action(type, key) {
+            const inputId = key === 'amount' ? 'amt' : (key === 'budget' ? 'newBudget' : 'newPayday');
+            const val = document.getElementById(inputId).value;
             const desc = document.getElementById('desc').value;
-            if(!amt) return;
+            if(!val) return;
+            
+            const body = { description: desc || 'Utgift' };
+            if(key === 'amount') body.amount = Number(val);
+            if(key === 'budget') body.budget = Number(val);
+            if(key === 'payday') body.payday = Number(val);
+
             await fetch('/api/' + type + '/' + curUser + '/' + curPass, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ amount: Number(amt), description: desc || 'Utgift' })
+              body: JSON.stringify(body)
             });
-            document.getElementById('amt').value = '';
-            document.getElementById('desc').value = '';
+            document.getElementById(inputId).value = '';
+            if(key === 'amount') document.getElementById('desc').value = '';
             update();
           }
 
