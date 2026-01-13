@@ -13,7 +13,7 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// 1. SCHEMA MED ANVÄNDARNAMN
+// 1. SCHEMA MED SPAR-STATISTIK
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -21,7 +21,10 @@ const transactionSchema = new mongoose.Schema({
 });
 
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true }, // Här skiljer vi på folk
+  username: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  totalSavings: { type: Number, default: 0 },
+  monthsArchived: { type: Number, default: 0 }, // Nytt fält för att räkna snittet
   initialBudget: { type: Number, default: 12000 },
   remainingBudget: { type: Number, default: 12000 },
   targetPayday: { type: Number, default: 25 },
@@ -30,76 +33,68 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-function getActualPayday(targetDay) {
-  let now = new Date();
-  let payday = new Date(now.getFullYear(), now.getMonth(), targetDay);
+// 2. API ROUTES
+app.post("/api/login", async (req, res) => {
+  const { username, password } = req.body;
+  let user = await User.findOne({ username });
+  if (!user) {
+    user = await User.create({ username, password });
+    return res.json({ success: true });
+  }
+  if (user.password !== password) return res.status(401).json({ success: false, message: "Fel lösenord!" });
+  res.json({ success: true });
+});
+
+app.get("/api/overview/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (!user) return res.status(401).json({ error: "Obehörig" });
+
+  const now = new Date();
+  let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
   if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
   else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
-  if (new Date() >= payday.setHours(23, 59, 59)) {
-    payday = new Date(now.getFullYear(), now.getMonth() + 1, targetDay);
-    if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
-    else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+  if (now >= payday.setHours(23, 59, 59)) {
+    payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
   }
-  return payday;
-}
 
-// 2. API ROUTES (Nu med username i alla anrop)
-app.get("/api/overview/:username", async (req, res) => {
-  const { username } = req.params;
-  let user = await User.findOne({ username });
-  if (!user) user = await User.create({ username });
+  const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
+  const usedPercent = Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100));
   
-  const payday = getActualPayday(user.targetPayday);
-  const daysLeft = Math.max(1, Math.ceil((payday - new Date()) / (1000 * 60 * 60 * 24)));
-  const usedAmount = user.initialBudget - user.remainingBudget;
-  const usedPercent = Math.min(100, Math.max(0, (usedAmount / user.initialBudget) * 100));
+  // Räkna ut snittsparande
+  const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
 
   res.json({
     dailyLimit: Math.floor(user.remainingBudget / daysLeft),
     daysLeft,
     paydayDate: payday.toLocaleDateString('sv-SE'),
     remainingBudget: user.remainingBudget,
-    initialBudget: user.initialBudget,
+    totalSavings: user.totalSavings,
+    avgSavings, // Skickar med snittet till frontend
     usedPercent,
-    targetPayday: user.targetPayday,
     transactions: user.transactions
   });
 });
 
-app.post("/api/spend/:username", async (req, res) => {
-  const { amount, description } = req.body;
-  const user = await User.findOne({ username: req.params.username });
-  user.remainingBudget -= amount;
-  user.transactions.push({ amount, description });
-  await user.save();
-  res.json({ success: true });
-});
-
-app.post("/api/set-budget/:username", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  user.initialBudget = req.body.budget;
-  user.remainingBudget = req.body.budget;
-  user.transactions = []; 
-  await user.save();
-  res.json({ success: true });
-});
-
-app.post("/api/set-payday/:username", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  user.targetPayday = req.body.payday;
-  await user.save();
-  res.json({ success: true });
-});
-
-app.delete("/api/delete-transaction/:username/:id", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  const tx = user.transactions.id(req.params.id);
-  if (tx) {
-    user.remainingBudget += tx.amount;
-    tx.deleteOne();
+app.post("/api/archive-month/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.totalSavings += user.remainingBudget;
+    user.monthsArchived += 1; // Öka antal månader när man sparar
+    user.remainingBudget = user.initialBudget;
+    user.transactions = [];
     await user.save();
+    res.json({ success: true });
   }
-  res.json({ success: true });
+});
+
+app.post("/api/spend/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.remainingBudget -= req.body.amount;
+    user.transactions.push({ amount: req.body.amount, description: req.body.description });
+    await user.save();
+    res.json({ success: true });
+  }
 });
 
 app.get("/", (req, res) => {
@@ -107,98 +102,131 @@ app.get("/", (req, res) => {
     <!DOCTYPE html>
     <html>
       <head>
-        <title>Budget</title>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
         <meta name="apple-mobile-web-app-capable" content="yes">
-        <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2489/2489756.png">
         <style>
           body { font-family: -apple-system, sans-serif; text-align: center; padding: 20px; background: #f0f2f5; margin: 0; }
           .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 400px; margin: auto; }
-          h1 { font-size: 55px; margin: 5px 0; color: #2ecc71; letter-spacing: -2px; }
-          .label { color: #8a8d91; text-transform: uppercase; font-size: 11px; font-weight: bold; }
-          .progress-container { background: #eee; border-radius: 10px; height: 12px; margin: 15px 0; overflow: hidden; }
+          h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; }
+          .savings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+          .savings-card { background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 15px; font-weight: bold; font-size: 13px; }
+          .progress-container { background: #eee; border-radius: 10px; height: 10px; margin: 15px 0; overflow: hidden; }
           .progress-bar { height: 100%; width: 0%; transition: width 0.5s ease; }
           .section { margin-top: 25px; border-top: 1px solid #f0f0f0; padding-top: 20px; }
-          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background: #fafafa; }
+          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; }
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
-          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f9f9f9; text-align: left; }
-          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 8px 12px; font-size: 11px; border-radius: 8px; border: none; }
-          .user-badge { background: #eee; padding: 5px 10px; border-radius: 20px; font-size: 12px; display: inline-block; margin-bottom: 10px; color: #666; }
+          #loginScreen { display: block; }
+          #appScreen { display: none; }
+          .history-item { font-size: 14px; border-bottom: 1px solid #eee; padding: 10px 0; text-align: left; }
         </style>
       </head>
       <body>
-        <div class="card">
-          <div class="user-badge" id="userDisplay">Användare</div>
-          <p class="label">Kvar att spendera idag</p>
+        <div id="loginScreen" class="card">
+          <h2 style="margin-bottom:20px">Budget App</h2>
+          <input type="text" id="userIn" placeholder="Användarnamn">
+          <input type="password" id="passIn" placeholder="Lösenord">
+          <button onclick="login()">Logga in / Skapa profil</button>
+        </div>
+
+        <div id="appScreen" class="card">
+          <div class="savings-grid">
+            <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings" style="font-size:18px">0</span> kr</div>
+            <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/månad<br><span id="avgSavings" style="font-size:18px">0</span> kr</div>
+          </div>
+          
+          <p style="font-size: 11px; font-weight:bold; color:#888; letter-spacing:1px">IDAG KAN DU GÖRA AV MED</p>
           <h1 id="daily">...</h1>
           <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
-          <p id="stats" style="font-size: 14px; color: #4b4b4b; margin-bottom: 10px;"></p>
+          <p id="stats" style="font-size: 13px; color: #666"></p>
 
           <div class="section">
-            <p class="label">Ny utgift</p>
-            <input type="text" id="desc" placeholder="Vad?">
-            <input type="number" id="amt" inputmode="decimal" placeholder="Kr">
-            <button onclick="saveAction('spend', 'amount')">Spara</button>
+            <input type="text" id="desc" placeholder="Vad har du köpt?">
+            <input type="number" id="amt" inputmode="decimal" placeholder="Belopp i kr">
+            <button onclick="action('spend')">Spara köp</button>
           </div>
 
           <div class="section">
-            <p class="label">Inställningar</p>
-            <input type="number" id="newBudget" placeholder="Totalbudget">
-            <button onclick="saveAction('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 10px;">Sätt budget</button>
-            <input type="number" id="newPayday" placeholder="Lönedag">
-            <button onclick="saveAction('set-payday', 'payday')" style="background:#8e44ad">Sätt lönedag</button>
+            <button onclick="archive()" style="background:#27ae60">Avsluta månad & Spara</button>
           </div>
-          <div class="section" style="text-align: left;"><p class="label">Historik</p><div id="list"></div></div>
+          
+          <div id="list" style="margin-top: 20px;"></div>
+          <button onclick="logout()" style="background:none; color:#999; font-size:12px; margin-top:30px">Logga ut från profil</button>
         </div>
 
         <script>
-          const urlParams = new URLSearchParams(window.location.search);
-          const username = urlParams.get('user') || 'default';
-          document.getElementById('userDisplay').innerText = "Profil: " + username;
+          let curUser = localStorage.getItem('budget_user');
+          let curPass = localStorage.getItem('budget_pass');
+
+          if(curUser && curPass) showApp();
+
+          async function login() {
+            const u = document.getElementById('userIn').value;
+            const p = document.getElementById('passIn').value;
+            const res = await fetch('/api/login', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ username: u, password: p })
+            });
+            if(res.ok) {
+              localStorage.setItem('budget_user', u);
+              localStorage.setItem('budget_pass', p);
+              curUser = u; curPass = p;
+              showApp();
+            } else { alert("Fel lösenord eller problem med inloggning."); }
+          }
+
+          function showApp() {
+            document.getElementById('loginScreen').style.display = 'none';
+            document.getElementById('appScreen').style.display = 'block';
+            update();
+          }
 
           async function update() {
-            const res = await fetch('/api/overview/' + username);
+            const res = await fetch('/api/overview/' + curUser + '/' + curPass);
             const data = await res.json();
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
-            document.getElementById('stats').innerHTML = '<b>' + data.remainingBudget + ' / ' + data.initialBudget + ' kr</b> kvar<br>Lön: ' + data.paydayDate;
+            document.getElementById('totalSavings').innerText = data.totalSavings;
+            document.getElementById('avgSavings').innerText = data.avgSavings;
+            document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> | Lön: ' + data.paydayDate;
+            
             const bar = document.getElementById('bar');
             bar.style.width = data.usedPercent + '%';
             bar.style.backgroundColor = data.usedPercent < 50 ? '#2ecc71' : (data.usedPercent < 80 ? '#f1c40f' : '#e74c3c');
             
-            const list = document.getElementById('list');
-            list.innerHTML = '';
-            data.transactions.slice().reverse().forEach(t => {
-              const item = document.createElement('div');
-              item.className = 'history-item';
-              item.innerHTML = '<div>' + t.description + ' (-' + t.amount + ' kr)</div>' +
-                                '<button class="undo-btn" onclick="deleteItem(\\'' + t._id + '\\')">Ångra</button>';
-              list.appendChild(item);
-            });
+            document.getElementById('list').innerHTML = data.transactions.slice(-5).reverse().map(t => 
+              '<div class="history-item">' + t.description + ' <span style="float:right; color:#ff4d4d">-' + t.amount + ' kr</span></div>'
+            ).join('');
           }
 
-          async function deleteItem(id) {
-            await fetch('/api/delete-transaction/' + username + '/' + id, { method: 'DELETE' });
-            update();
-          }
-
-          async function saveAction(action, key) {
-            const inputId = key === 'amount' ? 'amt' : (key === 'budget' ? 'newBudget' : 'newPayday');
-            const val = document.getElementById(inputId).value;
+          async function action(type) {
+            const amt = document.getElementById('amt').value;
             const desc = document.getElementById('desc').value;
-            if(!val) return;
-            await fetch('/api/' + action + '/' + username, {
+            if(!amt) return;
+            await fetch('/api/' + type + '/' + curUser + '/' + curPass, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ [key]: Number(val), description: desc || 'Utgift' })
+              body: JSON.stringify({ amount: Number(amt), description: desc || 'Utgift' })
             });
-            document.getElementById(inputId).value = '';
+            document.getElementById('amt').value = '';
+            document.getElementById('desc').value = '';
             update();
           }
-          update();
+
+          async function archive() {
+            if(confirm("Vill du flytta dina kvarvarande pengar till spargrisen och börja på en ny månad?")) {
+              await fetch('/api/archive-month/' + curUser + '/' + curPass, { method: 'POST' });
+              update();
+            }
+          }
+
+          function logout() {
+            localStorage.clear();
+            location.reload();
+          }
         </script>
       </body>
     </html>
   `);
 });
 
-app.listen(PORT, () => console.log("Server redo på port " + PORT));
+app.listen(PORT, () => console.log("Server redo!"));
