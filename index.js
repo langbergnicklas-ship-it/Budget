@@ -1,7 +1,6 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const nodemailer = require("nodemailer");
 const app = express();
 
 app.use(cors());
@@ -14,22 +13,31 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// BREVO SMTP-KONFIGURATION (Optimerad för att undvika timeout)
-const transporter = nodemailer.createTransport({
-  host: "smtp-relay.brevo.com",
-  port: 587,
-  secure: false, 
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  },
-  tls: {
-    rejectUnauthorized: false
-  },
-  connectionTimeout: 15000 
-});
+// FUNKTION FÖR ATT SKICKA MEJL VIA BREVO API (Istället för SMTP)
+async function sendWelcomeEmail(toEmail, username, password) {
+  try {
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "api-key": process.env.BREVO_API_KEY,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        sender: { name: "Budget Appen", email: process.env.SENDER_EMAIL },
+        to: [{ email: toEmail }],
+        subject: "Välkommen till din Budget App! 💰",
+        htmlContent: `<h2>Hej ${username}!</h2><p>Här är dina uppgifter:</p><ul><li><b>Användarnamn:</b> ${username}</li><li><b>Lösenord:</b> ${password}</li></ul><p><a href="https://budget-epew.onrender.com/">Öppna appen här</a></p>`
+      })
+    });
+    const result = await response.json();
+    console.log("Brevo API svar:", result);
+  } catch (error) {
+    console.error("API Mejlfel:", error);
+  }
+}
 
-// DATA SCHEMA
+// 1. DATA SCHEMA
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -50,27 +58,27 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// API ROUTES
+// 2. API ROUTES
 app.post("/api/login", async (req, res) => {
   const { username, password, email } = req.body;
   let user = await User.findOne({ username });
   
   if (!user) {
+    // Skapa ny profil
     user = await User.create({ username, password, email });
-    if (email) {
-      const mailOptions = {
-        from: '"Budget Appen" <' + process.env.EMAIL_USER + '>',
-        to: email,
-        subject: 'Välkommen till din Budget App! 💰',
-        html: `<h2>Hej ${username}!</h2><p>Här är dina uppgifter:</p><ul><li><b>Användarnamn:</b> ${username}</li><li><b>Lösenord:</b> ${password}</li></ul><p><a href="https://budget-epew.onrender.com/">Öppna appen här</a></p>`
-      };
-      // Skicka mejl i bakgrunden utan att låta anslutningen vänta
-      transporter.sendMail(mailOptions).catch(err => console.log("Mejlfel:", err));
+    
+    // Skicka välkomstmejl om API-nyckel finns
+    if (email && process.env.BREVO_API_KEY) {
+      sendWelcomeEmail(email, username, password);
     }
     return res.json({ success: true });
   }
   
-  if (user.password !== password) return res.status(401).json({ success: false });
+  // Kontrollera lösenord för befintlig användare
+  if (user.password !== password) {
+    return res.status(401).json({ success: false, message: "Fel lösenord!" });
+  }
+  
   res.json({ success: true });
 });
 
@@ -123,27 +131,6 @@ app.post("/api/set-budget/:username/:password", async (req, res) => {
   }
 });
 
-app.post("/api/set-payday/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
-    user.targetPayday = req.body.payday;
-    await user.save();
-    res.json({ success: true });
-  }
-});
-
-app.post("/api/archive-month/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
-    user.totalSavings += user.remainingBudget;
-    user.monthsArchived += 1;
-    user.remainingBudget = user.initialBudget;
-    user.transactions = [];
-    await user.save();
-    res.json({ success: true });
-  }
-});
-
 app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
   const user = await User.findOne({ username: req.params.username, password: req.params.password });
   if (user) {
@@ -157,6 +144,7 @@ app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) =
   }
 });
 
+// 3. FRONTEND (HTML/JS)
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -167,7 +155,6 @@ app.get("/", (req, res) => {
           body { font-family: -apple-system, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding-bottom: 80px; }
           .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
           h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; letter-spacing: -2px; }
-          .savings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
           .savings-card { background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 15px; font-weight: bold; font-size: 13px; }
           .progress-container { background: #eee; border-radius: 10px; height: 10px; margin: 15px 0; overflow: hidden; }
           .progress-bar { height: 100%; width: 0%; transition: width 0.5s ease; }
@@ -176,7 +163,7 @@ app.get("/", (req, res) => {
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
           #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 12px 25px; border-radius: 30px; font-size: 14px; font-weight: bold; display: none; z-index: 1000; }
           .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; display: flex; border-top: 1px solid #eee; padding: 10px 0; }
-          .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; display: flex; flex-direction: column; align-items: center; }
+          .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; }
           .tab-btn.active { color: #0084ff; }
           #loginScreen { display: block; padding-top: 50px; }
           #mainContent { display: none; }
@@ -193,18 +180,17 @@ app.get("/", (req, res) => {
             <h2 style="margin-bottom:20px">Budget App</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="Din e-post">
+            <input type="email" id="emailIn" placeholder="Din e-post (för välkomstmejl)">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
         <div id="mainContent">
           <div id="view-home" class="view active">
             <div class="card">
-              <div class="savings-grid">
-                <div class="savings-card">💰 Totalt<br><span id="totalSavings">0</span> kr</div>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:15px">
+                <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings">0</span> kr</div>
                 <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
               </div>
-              <p style="font-size: 11px; font-weight:bold; color:#888">DAGSBUDGET</p>
               <h1 id="daily">...</h1>
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: #666"></p>
@@ -220,10 +206,7 @@ app.get("/", (req, res) => {
             <div class="card">
               <h2 style="margin-top:0">Inställningar</h2>
               <input type="number" id="newBudget" placeholder="Ny budget">
-              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 20px;">Sätt budget</button>
-              <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
-              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom: 30px;">Sätt lönedag</button>
-              <button onclick="archive()" style="background:#f39c12; margin-bottom: 10px;">Avsluta månad</button>
+              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 20px;">Sätt ny budget</button>
               <button onclick="logout()" style="background:#888">Logga ut</button>
             </div>
           </div>
@@ -236,11 +219,13 @@ app.get("/", (req, res) => {
           let curUser = localStorage.getItem('budget_user');
           let curPass = localStorage.getItem('budget_pass');
           if(curUser && curPass) showApp();
+
           function showToast(msg) {
             const t = document.getElementById('toast');
             t.innerText = msg; t.style.display = 'block';
             setTimeout(() => { t.style.display = 'none'; }, 2500);
           }
+
           async function login() {
             const u = document.getElementById('userIn').value;
             const p = document.getElementById('passIn').value;
@@ -255,17 +240,20 @@ app.get("/", (req, res) => {
               curUser = u; curPass = p; showApp();
             } else { alert("Fel inloggning."); }
           }
+
           function showApp() {
             document.getElementById('loginScreen').style.display = 'none';
             document.getElementById('mainContent').style.display = 'block';
             update();
           }
+
           function showTab(tab) {
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.getElementById('view-' + tab).classList.add('active');
             document.getElementById('btn-' + tab).classList.add('active');
           }
+
           async function update() {
             const res = await fetch('/api/overview/' + curUser + '/' + curPass);
             const data = await res.json();
@@ -279,20 +267,21 @@ app.get("/", (req, res) => {
               '<button class="undo-btn" onclick="deleteItem(\\'' + t._id + '\\')">Ångra</button></div>'
             ).join('');
           }
+
           async function deleteItem(id) {
             if(confirm("Ta bort köpet?")) {
               await fetch('/api/delete-transaction/' + curUser + '/' + curPass + '/' + id, { method: 'DELETE' });
               update(); showToast("Borttaget!");
             }
           }
+
           async function action(type, key) {
-            const inputId = key === 'amount' ? 'amt' : (key === 'budget' ? 'newBudget' : 'newPayday');
+            const inputId = key === 'amount' ? 'amt' : 'newBudget';
             const val = document.getElementById(inputId).value;
             if(!val) return;
             const body = { description: document.getElementById('desc').value || 'Utgift' };
             if(key === 'amount') body.amount = Number(val);
             if(key === 'budget') body.budget = Number(val);
-            if(key === 'payday') body.payday = Number(val);
             await fetch('/api/' + type + '/' + curUser + '/' + curPass, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
@@ -301,12 +290,7 @@ app.get("/", (req, res) => {
             document.getElementById(inputId).value = ''; update();
             showToast("Sparat!"); if(key !== 'amount') showTab('home');
           }
-          async function archive() {
-            if(confirm("Spara överskottet?")) {
-              await fetch('/api/archive-month/' + curUser + '/' + curPass, { method: 'POST' });
-              update(); showToast("Månaden klar!"); showTab('home');
-            }
-          }
+
           function logout() { localStorage.clear(); location.reload(); }
         </script>
       </body>
