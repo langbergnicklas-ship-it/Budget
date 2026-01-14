@@ -1,6 +1,7 @@
 {
   "name": "budget-app",
   "version": "1.0.0",
+  "description": "Budget app med profil och mejlnotiser",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -8,6 +9,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "mongoose": "^8.0.0"
+    "mongoose": "^8.0.0",
+    "nodemailer": "^6.9.0"
   }
 }
