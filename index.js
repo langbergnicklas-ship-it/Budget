@@ -13,7 +13,7 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// FUNKTION FÖR ATT SKICKA MEJL VIA BREVO API (Istället för SMTP)
+// --- BREVO API MEJL-FUNKTION ---
 async function sendWelcomeEmail(toEmail, username, password) {
   try {
     const response = await fetch("https://api.brevo.com/v3/smtp/email", {
@@ -37,7 +37,7 @@ async function sendWelcomeEmail(toEmail, username, password) {
   }
 }
 
-// 1. DATA SCHEMA
+// --- DATA SCHEMA ---
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -58,27 +58,18 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// 2. API ROUTES
+// --- API ROUTES ---
 app.post("/api/login", async (req, res) => {
   const { username, password, email } = req.body;
   let user = await User.findOne({ username });
-  
   if (!user) {
-    // Skapa ny profil
     user = await User.create({ username, password, email });
-    
-    // Skicka välkomstmejl om API-nyckel finns
     if (email && process.env.BREVO_API_KEY) {
       sendWelcomeEmail(email, username, password);
     }
     return res.json({ success: true });
   }
-  
-  // Kontrollera lösenord för befintlig användare
-  if (user.password !== password) {
-    return res.status(401).json({ success: false, message: "Fel lösenord!" });
-  }
-  
+  if (user.password !== password) return res.status(401).json({ success: false });
   res.json({ success: true });
 });
 
@@ -88,15 +79,19 @@ app.get("/api/overview/:username/:password", async (req, res) => {
 
   const now = new Date();
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
+  
+  // Justera om lönedag är helg
   if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
   else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+  
+  // Om lönedagen redan varit denna månad, titta på nästa månad
   if (now >= payday.setHours(23, 59, 59)) {
     payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
+    if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+    else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   }
 
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
-  const usedPercent = Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100));
-
   res.json({
     dailyLimit: Math.floor(user.remainingBudget / daysLeft),
     daysLeft,
@@ -105,7 +100,7 @@ app.get("/api/overview/:username/:password", async (req, res) => {
     initialBudget: user.initialBudget,
     totalSavings: user.totalSavings,
     avgSavings: user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0,
-    usedPercent,
+    usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
     transactions: user.transactions
   });
 });
@@ -131,6 +126,27 @@ app.post("/api/set-budget/:username/:password", async (req, res) => {
   }
 });
 
+app.post("/api/set-payday/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.targetPayday = req.body.payday;
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/archive-month/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.totalSavings += user.remainingBudget;
+    user.monthsArchived += 1;
+    user.remainingBudget = user.initialBudget;
+    user.transactions = [];
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
 app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
   const user = await User.findOne({ username: req.params.username, password: req.params.password });
   if (user) {
@@ -144,7 +160,7 @@ app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) =
   }
 });
 
-// 3. FRONTEND (HTML/JS)
+// --- FRONTEND ---
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -177,10 +193,10 @@ app.get("/", (req, res) => {
         <div id="toast">Sparat!</div>
         <div id="loginScreen">
           <div class="card">
-            <h2 style="margin-bottom:20px">Budget App</h2>
+            <h2>Budget App</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="Din e-post (för välkomstmejl)">
+            <input type="email" id="emailIn" placeholder="Din e-post">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
@@ -191,12 +207,13 @@ app.get("/", (req, res) => {
                 <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings">0</span> kr</div>
                 <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
               </div>
+              <p style="font-size:11px; font-weight:bold; color:#888">DAGSBUDGET</p>
               <h1 id="daily">...</h1>
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: #666"></p>
               <div class="section">
-                <input type="text" id="desc" placeholder="Vad köpte du?">
-                <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
+                <input type="text" id="desc" placeholder="Vad?">
+                <input type="number" id="amt" inputmode="decimal" placeholder="Belopp">
                 <button onclick="action('spend', 'amount')">Spara köp</button>
               </div>
               <div id="list" style="margin-top: 20px;"></div>
@@ -204,9 +221,12 @@ app.get("/", (req, res) => {
           </div>
           <div id="view-settings" class="view">
             <div class="card">
-              <h2 style="margin-top:0">Inställningar</h2>
-              <input type="number" id="newBudget" placeholder="Ny budget">
-              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 20px;">Sätt ny budget</button>
+              <h2>Inställningar</h2>
+              <input type="number" id="newBudget" placeholder="Ny månadsbudget">
+              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Sätt budget</button>
+              <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
+              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:20px">Sätt lönedag</button>
+              <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
               <button onclick="logout()" style="background:#888">Logga ut</button>
             </div>
           </div>
@@ -276,12 +296,13 @@ app.get("/", (req, res) => {
           }
 
           async function action(type, key) {
-            const inputId = key === 'amount' ? 'amt' : 'newBudget';
+            const inputId = key === 'amount' ? 'amt' : (key === 'budget' ? 'newBudget' : 'newPayday');
             const val = document.getElementById(inputId).value;
             if(!val) return;
             const body = { description: document.getElementById('desc').value || 'Utgift' };
             if(key === 'amount') body.amount = Number(val);
             if(key === 'budget') body.budget = Number(val);
+            if(key === 'payday') body.payday = Number(val);
             await fetch('/api/' + type + '/' + curUser + '/' + curPass, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
@@ -289,6 +310,13 @@ app.get("/", (req, res) => {
             });
             document.getElementById(inputId).value = ''; update();
             showToast("Sparat!"); if(key !== 'amount') showTab('home');
+          }
+
+          async function archive() {
+            if(confirm("Spara överskottet till nästa månad?")) {
+              await fetch('/api/archive-month/' + curUser + '/' + curPass, { method: 'POST' });
+              update(); showToast("Månaden klar!"); showTab('home');
+            }
           }
 
           function logout() { localStorage.clear(); location.reload(); }
