@@ -124,6 +124,20 @@ app.post("/api/archive-month/:username/:password", async (req, res) => {
   }
 });
 
+// RADERA TRANSAKTION (ÅNGRA)
+app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    const tx = user.transactions.id(req.params.id);
+    if (tx) {
+      user.remainingBudget += tx.amount;
+      tx.deleteOne();
+      await user.save();
+    }
+    res.json({ success: true });
+  }
+});
+
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -143,7 +157,6 @@ app.get("/", (req, res) => {
           input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background:#f9f9f9; }
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
           
-          /* Navigering längst ner */
           .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; display: flex; border-top: 1px solid #eee; padding: 10px 0; padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
           .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; display: flex; flex-direction: column; align-items: center; }
           .tab-btn.active { color: #0084ff; }
@@ -153,7 +166,9 @@ app.get("/", (req, res) => {
           #mainContent { display: none; }
           .view { display: none; }
           .view.active { display: block; }
-          .history-item { font-size: 14px; border-bottom: 1px solid #eee; padding: 10px 0; text-align: left; }
+          
+          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f9f9f9; text-align: left; font-size: 14px; }
+          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 6px 10px; font-size: 11px; border-radius: 8px; border: none; font-weight: bold; }
         </style>
       </head>
       <body>
@@ -264,9 +279,24 @@ app.get("/", (req, res) => {
             const bar = document.getElementById('bar');
             bar.style.width = data.usedPercent + '%';
             bar.style.backgroundColor = data.usedPercent < 50 ? '#2ecc71' : (data.usedPercent < 80 ? '#f1c40f' : '#e74c3c');
-            document.getElementById('list').innerHTML = data.transactions.slice(-5).reverse().map(t => 
-              '<div class="history-item">' + t.description + ' <span style="float:right; color:#ff4d4d">-' + t.amount + ' kr</span></div>'
-            ).join('');
+            
+            // Uppdaterad historik med Ångra-knapp
+            const list = document.getElementById('list');
+            list.innerHTML = '';
+            data.transactions.slice(-10).reverse().forEach(t => {
+              const item = document.createElement('div');
+              item.className = 'history-item';
+              item.innerHTML = '<div>' + t.description + ' (-' + t.amount + ' kr)</div>' +
+                                '<button class="undo-btn" onclick="deleteItem(\\'' + t._id + '\\')">Ångra</button>';
+              list.appendChild(item);
+            });
+          }
+
+          async function deleteItem(id) {
+            if(confirm("Vill du ta bort det här köpet?")) {
+              await fetch('/api/delete-transaction/' + curUser + '/' + curPass + '/' + id, { method: 'DELETE' });
+              update();
+            }
           }
 
           async function action(type, key) {
@@ -284,8 +314,9 @@ app.get("/", (req, res) => {
               body: JSON.stringify(body)
             });
             document.getElementById(inputId).value = '';
+            if(key === 'amount') document.getElementById('desc').value = '';
             update();
-            if(key !== 'amount') showTab('home'); // Hoppa tillbaka till hemvyn efter inställning
+            if(key !== 'amount') showTab('home');
           }
 
           async function archive() {
