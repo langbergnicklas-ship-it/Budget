@@ -14,16 +14,22 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// BREVO MEJL-KONFIGURATION
+// BREVO SMTP-KONFIGURATION (Optimerad för att undvika timeout)
 const transporter = nodemailer.createTransport({
   host: "smtp-relay.brevo.com",
   port: 587,
+  secure: false, 
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  }
+  },
+  tls: {
+    rejectUnauthorized: false
+  },
+  connectionTimeout: 15000 
 });
 
+// DATA SCHEMA
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -44,9 +50,11 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
+// API ROUTES
 app.post("/api/login", async (req, res) => {
   const { username, password, email } = req.body;
   let user = await User.findOne({ username });
+  
   if (!user) {
     user = await User.create({ username, password, email });
     if (email) {
@@ -56,10 +64,12 @@ app.post("/api/login", async (req, res) => {
         subject: 'Välkommen till din Budget App! 💰',
         html: `<h2>Hej ${username}!</h2><p>Här är dina uppgifter:</p><ul><li><b>Användarnamn:</b> ${username}</li><li><b>Lösenord:</b> ${password}</li></ul><p><a href="https://budget-epew.onrender.com/">Öppna appen här</a></p>`
       };
-      transporter.sendMail(mailOptions);
+      // Skicka mejl i bakgrunden utan att låta anslutningen vänta
+      transporter.sendMail(mailOptions).catch(err => console.log("Mejlfel:", err));
     }
     return res.json({ success: true });
   }
+  
   if (user.password !== password) return res.status(401).json({ success: false });
   res.json({ success: true });
 });
@@ -67,6 +77,7 @@ app.post("/api/login", async (req, res) => {
 app.get("/api/overview/:username/:password", async (req, res) => {
   const user = await User.findOne({ username: req.params.username, password: req.params.password });
   if (!user) return res.status(401).json({ error: "Obehörig" });
+
   const now = new Date();
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
   if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
@@ -74,8 +85,10 @@ app.get("/api/overview/:username/:password", async (req, res) => {
   if (now >= payday.setHours(23, 59, 59)) {
     payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
   }
+
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const usedPercent = Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100));
+
   res.json({
     dailyLimit: Math.floor(user.remainingBudget / daysLeft),
     daysLeft,
@@ -153,62 +166,64 @@ app.get("/", (req, res) => {
         <style>
           body { font-family: -apple-system, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding-bottom: 80px; }
           .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
-          h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; }
+          h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; letter-spacing: -2px; }
+          .savings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
           .savings-card { background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 15px; font-weight: bold; font-size: 13px; }
           .progress-container { background: #eee; border-radius: 10px; height: 10px; margin: 15px 0; overflow: hidden; }
           .progress-bar { height: 100%; width: 0%; transition: width 0.5s ease; }
           .section { margin-top: 25px; border-top: 1px solid #f0f0f0; padding-top: 20px; }
-          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; font-size: 16px; background:#f9f9f9; box-sizing: border-box; }
+          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background:#f9f9f9; }
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
-          #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 12px 25px; border-radius: 30px; display: none; z-index: 1000; }
+          #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 12px 25px; border-radius: 30px; font-size: 14px; font-weight: bold; display: none; z-index: 1000; }
           .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; display: flex; border-top: 1px solid #eee; padding: 10px 0; }
-          .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; }
+          .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; display: flex; flex-direction: column; align-items: center; }
           .tab-btn.active { color: #0084ff; }
-          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #f9f9f9; }
-          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 5px 10px; border-radius: 8px; border: none; font-size: 11px; }
           #loginScreen { display: block; padding-top: 50px; }
           #mainContent { display: none; }
           .view { display: none; }
           .view.active { display: block; }
+          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f9f9f9; text-align: left; font-size: 14px; }
+          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 6px 10px; font-size: 11px; border-radius: 8px; border: none; font-weight: bold; }
         </style>
       </head>
       <body>
         <div id="toast">Sparat!</div>
         <div id="loginScreen">
           <div class="card">
-            <h2>Budget App</h2>
+            <h2 style="margin-bottom:20px">Budget App</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="E-post (för välkomstmejl)">
+            <input type="email" id="emailIn" placeholder="Din e-post">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
         <div id="mainContent">
           <div id="view-home" class="view active">
             <div class="card">
-              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:15px">
+              <div class="savings-grid">
                 <div class="savings-card">💰 Totalt<br><span id="totalSavings">0</span> kr</div>
                 <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
               </div>
+              <p style="font-size: 11px; font-weight:bold; color:#888">DAGSBUDGET</p>
               <h1 id="daily">...</h1>
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: #666"></p>
               <div class="section">
-                <input type="text" id="desc" placeholder="Vad?">
-                <input type="number" id="amt" inputmode="decimal" placeholder="Kr">
+                <input type="text" id="desc" placeholder="Vad köpte du?">
+                <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
                 <button onclick="action('spend', 'amount')">Spara köp</button>
               </div>
-              <div id="list" style="margin-top:20px"></div>
+              <div id="list" style="margin-top: 20px;"></div>
             </div>
           </div>
           <div id="view-settings" class="view">
             <div class="card">
-              <h2>Inställningar</h2>
+              <h2 style="margin-top:0">Inställningar</h2>
               <input type="number" id="newBudget" placeholder="Ny budget">
-              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Uppdatera budget</button>
-              <input type="number" id="newPayday" placeholder="Lönedag">
-              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:20px">Sätt lönedag</button>
-              <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad</button>
+              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom: 20px;">Sätt budget</button>
+              <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
+              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom: 30px;">Sätt lönedag</button>
+              <button onclick="archive()" style="background:#f39c12; margin-bottom: 10px;">Avsluta månad</button>
               <button onclick="logout()" style="background:#888">Logga ut</button>
             </div>
           </div>
@@ -273,6 +288,7 @@ app.get("/", (req, res) => {
           async function action(type, key) {
             const inputId = key === 'amount' ? 'amt' : (key === 'budget' ? 'newBudget' : 'newPayday');
             const val = document.getElementById(inputId).value;
+            if(!val) return;
             const body = { description: document.getElementById('desc').value || 'Utgift' };
             if(key === 'amount') body.amount = Number(val);
             if(key === 'budget') body.budget = Number(val);
