@@ -16,7 +16,7 @@ mongoose.connect(MONGODB_URI)
 // --- BREVO API MEJL-FUNKTION ---
 async function sendWelcomeEmail(toEmail, username, password) {
   try {
-    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
         "accept": "application/json",
@@ -30,8 +30,7 @@ async function sendWelcomeEmail(toEmail, username, password) {
         htmlContent: `<h2>Hej ${username}!</h2><p>Här är dina uppgifter:</p><ul><li><b>Användarnamn:</b> ${username}</li><li><b>Lösenord:</b> ${password}</li></ul><p><a href="https://budget-epew.onrender.com/">Öppna appen här</a></p>`
       })
     });
-    const result = await response.json();
-    console.log("Brevo API svar:", result);
+    console.log("Välkomstmejl skickat via API");
   } catch (error) {
     console.error("API Mejlfel:", error);
   }
@@ -41,6 +40,7 @@ async function sendWelcomeEmail(toEmail, username, password) {
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
+  category: { type: String, default: "Övrigt" },
   timestamp: { type: Date, default: Date.now }
 });
 
@@ -48,6 +48,7 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   email: { type: String },
+  theme: { type: String, default: "light" },
   totalSavings: { type: Number, default: 0 },
   monthsArchived: { type: Number, default: 0 },
   initialBudget: { type: Number, default: 12000 },
@@ -79,12 +80,8 @@ app.get("/api/overview/:username/:password", async (req, res) => {
 
   const now = new Date();
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
-  
-  // Justera om lönedag är helg
   if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
   else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
-  
-  // Om lönedagen redan varit denna månad, titta på nästa månad
   if (now >= payday.setHours(23, 59, 59)) {
     payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
     if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
@@ -101,7 +98,8 @@ app.get("/api/overview/:username/:password", async (req, res) => {
     totalSavings: user.totalSavings,
     avgSavings: user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0,
     usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
-    transactions: user.transactions
+    transactions: user.transactions,
+    theme: user.theme || "light"
   });
 });
 
@@ -109,7 +107,20 @@ app.post("/api/spend/:username/:password", async (req, res) => {
   const user = await User.findOne({ username: req.params.username, password: req.params.password });
   if (user) {
     user.remainingBudget -= req.body.amount;
-    user.transactions.push({ amount: req.body.amount, description: req.body.description });
+    user.transactions.push({ 
+      amount: req.body.amount, 
+      description: req.body.description,
+      category: req.body.category || "Övrigt" 
+    });
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/set-theme/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  if (user) {
+    user.theme = req.body.theme;
     await user.save();
     res.json({ success: true });
   }
@@ -164,36 +175,45 @@ app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) =
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
-    <html>
+    <html lang="sv">
       <head>
+        <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
         <style>
-          body { font-family: -apple-system, sans-serif; text-align: center; background: #f0f2f5; margin: 0; padding-bottom: 80px; }
-          .card { background: white; padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
+          :root {
+            --bg: #f0f2f5; --card: white; --text: #333; --sub: #666; --border: #eee; --input: #f9f9f9;
+          }
+          body.dark-mode {
+            --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --sub: #aaa; --border: #333; --input: #2a2a2a;
+          }
+          body { font-family: -apple-system, sans-serif; text-align: center; background: var(--bg); color: var(--text); margin: 0; padding-bottom: 80px; transition: 0.3s; }
+          .card { background: var(--card); padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
           h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; letter-spacing: -2px; }
           .savings-card { background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 15px; font-weight: bold; font-size: 13px; }
-          .progress-container { background: #eee; border-radius: 10px; height: 10px; margin: 15px 0; overflow: hidden; }
-          .progress-bar { height: 100%; width: 0%; transition: width 0.5s ease; }
-          .section { margin-top: 25px; border-top: 1px solid #f0f0f0; padding-top: 20px; }
-          input { padding: 15px; border: 1px solid #eee; border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background:#f9f9f9; }
+          .progress-container { background: var(--border); border-radius: 10px; height: 10px; margin: 15px 0; overflow: hidden; }
+          .progress-bar { height: 100%; width: 0%; transition: width 0.5s ease; background: #2ecc71; }
+          .section { margin-top: 25px; border-top: 1px solid var(--border); padding-top: 20px; }
+          input, select { padding: 15px; border: 1px solid var(--border); border-radius: 12px; width: 100%; margin-bottom: 10px; box-sizing: border-box; font-size: 16px; background: var(--input); color: var(--text); }
           button { padding: 15px; background: #0084ff; color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
           #toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #333; color: white; padding: 12px 25px; border-radius: 30px; font-size: 14px; font-weight: bold; display: none; z-index: 1000; }
-          .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: white; display: flex; border-top: 1px solid #eee; padding: 10px 0; }
-          .tab-btn { flex: 1; background: none; color: #888; border: none; font-size: 12px; font-weight: bold; }
+          .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; border-top: 1px solid var(--border); padding: 10px 0; }
+          .tab-btn { flex: 1; background: none; color: var(--sub); border: none; font-size: 12px; font-weight: bold; }
           .tab-btn.active { color: #0084ff; }
+          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; }
+          .cat-tag { font-size: 10px; background: var(--border); padding: 2px 6px; border-radius: 4px; color: var(--sub); margin-right: 5px; }
+          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 6px 10px; font-size: 11px; border-radius: 8px; border: none; font-weight: bold; }
+          .summary-item { display: flex; justify-content: space-between; font-size: 12px; color: var(--sub); padding: 4px 0; }
           #loginScreen { display: block; padding-top: 50px; }
           #mainContent { display: none; }
           .view { display: none; }
           .view.active { display: block; }
-          .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #f9f9f9; text-align: left; font-size: 14px; }
-          .undo-btn { background: #ffe5e5; color: #ff4d4d; padding: 6px 10px; font-size: 11px; border-radius: 8px; border: none; font-weight: bold; }
         </style>
       </head>
       <body>
         <div id="toast">Sparat!</div>
         <div id="loginScreen">
           <div class="card">
-            <h2>Budget App</h2>
+            <h2 style="margin-bottom:20px">Budget App</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
             <input type="email" id="emailIn" placeholder="Din e-post">
@@ -207,13 +227,28 @@ app.get("/", (req, res) => {
                 <div class="savings-card">💰 Totalt sparat<br><span id="totalSavings">0</span> kr</div>
                 <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
               </div>
-              <p style="font-size:11px; font-weight:bold; color:#888">DAGSBUDGET</p>
+              <p style="font-size:11px; font-weight:bold; color:var(--sub)">DAGSBUDGET</p>
               <h1 id="daily">...</h1>
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
-              <p id="stats" style="font-size: 13px; color: #666"></p>
+              <p id="stats" style="font-size: 13px; color: var(--sub); margin-bottom: 20px;"></p>
+              
+              <div id="categorySummary" style="margin: 15px 0; text-align: left; background: var(--input); padding: 15px; border-radius: 15px;">
+                <p style="font-size: 11px; font-weight: bold; margin-bottom: 10px;">DENNA PERIOD:</p>
+                <div id="summaryList"></div>
+              </div>
+
               <div class="section">
-                <input type="text" id="desc" placeholder="Vad?">
-                <input type="number" id="amt" inputmode="decimal" placeholder="Belopp">
+                <select id="cat">
+                  <option value="Övrigt">Välj kategori...</option>
+                  <option value="Hushåll">🧼 Hushåll</option>
+                  <option value="Mat">🍔 Mat & Dryck</option>
+                  <option value="Shopping">🛍️ Shopping</option>
+                  <option value="Transport">🚗 Transport</option>
+                  <option value="Hyra">🏠 Hem & Hyra</option>
+                  <option value="Nöje">🎉 Nöje</option>
+                </select>
+                <input type="text" id="desc" placeholder="Vad? (valfritt)">
+                <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
                 <button onclick="action('spend', 'amount')">Spara köp</button>
               </div>
               <div id="list" style="margin-top: 20px;"></div>
@@ -221,11 +256,12 @@ app.get("/", (req, res) => {
           </div>
           <div id="view-settings" class="view">
             <div class="card">
-              <h2>Inställningar</h2>
+              <h2 style="margin-top:0">Inställningar</h2>
+              <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 25px;">🌙 Mörkt läge: Av</button>
               <input type="number" id="newBudget" placeholder="Ny månadsbudget">
               <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Sätt budget</button>
               <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
-              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:20px">Sätt lönedag</button>
+              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
               <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
               <button onclick="logout()" style="background:#888">Logga ut</button>
             </div>
@@ -238,7 +274,34 @@ app.get("/", (req, res) => {
         <script>
           let curUser = localStorage.getItem('budget_user');
           let curPass = localStorage.getItem('budget_pass');
+          let currentTheme = "light";
+
           if(curUser && curPass) showApp();
+
+          function applyTheme(theme) {
+            currentTheme = theme;
+            if(theme === "dark") {
+              document.body.classList.add('dark-mode');
+              document.getElementById('themeBtn').innerText = "☀️ Mörkt läge: På";
+              document.getElementById('themeBtn').style.background = "#ddd";
+              document.getElementById('themeBtn').style.color = "#333";
+            } else {
+              document.body.classList.remove('dark-mode');
+              document.getElementById('themeBtn').innerText = "🌙 Mörkt läge: Av";
+              document.getElementById('themeBtn').style.background = "#444";
+              document.getElementById('themeBtn').style.color = "white";
+            }
+          }
+
+          async function toggleTheme() {
+            const newTheme = currentTheme === "light" ? "dark" : "light";
+            applyTheme(newTheme);
+            await fetch('/api/set-theme/' + curUser + '/' + curPass, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ theme: newTheme })
+            });
+          }
 
           function showToast(msg) {
             const t = document.getElementById('toast');
@@ -277,13 +340,25 @@ app.get("/", (req, res) => {
           async function update() {
             const res = await fetch('/api/overview/' + curUser + '/' + curPass);
             const data = await res.json();
+            applyTheme(data.theme);
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
             document.getElementById('totalSavings').innerText = data.totalSavings;
             document.getElementById('avgSavings').innerText = data.avgSavings;
             document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> | Lön: ' + data.paydayDate;
             document.getElementById('bar').style.width = data.usedPercent + '%';
+            
+            // Beräkna kategorisummering
+            const cats = {};
+            data.transactions.forEach(t => {
+              const c = t.category || "Övrigt";
+              cats[c] = (cats[c] || 0) + t.amount;
+            });
+            document.getElementById('summaryList').innerHTML = Object.entries(cats).map(([name, sum]) => 
+              '<div class="summary-item"><span>' + name + '</span><b>' + sum + ' kr</b></div>'
+            ).join('');
+
             document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => 
-              '<div class="history-item"><div>' + t.description + ' (-' + t.amount + ' kr)</div>' +
+              '<div class="history-item"><div><span class="cat-tag">' + (t.category || "Övrigt") + '</span>' + (t.description || "Utgift") + ' (-' + t.amount + ' kr)</div>' +
               '<button class="undo-btn" onclick="deleteItem(\\'' + t._id + '\\')">Ångra</button></div>'
             ).join('');
           }
@@ -299,16 +374,23 @@ app.get("/", (req, res) => {
             const inputId = key === 'amount' ? 'amt' : (key === 'budget' ? 'newBudget' : 'newPayday');
             const val = document.getElementById(inputId).value;
             if(!val) return;
-            const body = { description: document.getElementById('desc').value || 'Utgift' };
-            if(key === 'amount') body.amount = Number(val);
+            const body = {};
+            if(key === 'amount') {
+              body.amount = Number(val);
+              body.description = document.getElementById('desc').value;
+              body.category = document.getElementById('cat').value;
+            }
             if(key === 'budget') body.budget = Number(val);
             if(key === 'payday') body.payday = Number(val);
+            
             await fetch('/api/' + type + '/' + curUser + '/' + curPass, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(body)
             });
-            document.getElementById(inputId).value = ''; update();
+            document.getElementById(inputId).value = ''; 
+            if(key === 'amount') document.getElementById('desc').value = '';
+            update();
             showToast("Sparat!"); if(key !== 'amount') showTab('home');
           }
 
