@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs"); // NYTT: För säkerhet
 const app = express();
 
 app.use(cors());
@@ -30,7 +31,7 @@ async function sendWelcomeEmail(toEmail, username, password) {
         htmlContent: `<h2>Hej ${username}!</h2><p>Här är dina uppgifter:</p><ul><li><b>Användarnamn:</b> ${username}</li><li><b>Lösenord:</b> ${password}</li></ul><p><a href="https://budget-epew.onrender.com/">Öppna appen här</a></p>`
       })
     });
-    console.log("Välkomstmejl skickat via API");
+    console.log("Välkomstmejl skickat");
   } catch (error) {
     console.error("API Mejlfel:", error);
   }
@@ -60,23 +61,36 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model("User", userSchema);
 
 // --- API ROUTES ---
+
+// Uppdaterad login med lösenordskontroll
 app.post("/api/login", async (req, res) => {
   const { username, password, email } = req.body;
   let user = await User.findOne({ username });
+  
   if (!user) {
-    user = await User.create({ username, password, email });
+    // Kryptera lösenordet innan det sparas för ny användare
+    const hashedPassword = await bcrypt.hash(password, 10);
+    user = await User.create({ username, password: hashedPassword, email });
+    
     if (email && process.env.BREVO_API_KEY) {
       sendWelcomeEmail(email, username, password);
     }
     return res.json({ success: true });
   }
-  if (user.password !== password) return res.status(401).json({ success: false });
+
+  // Jämför det inskickade lösenordet med det krypterade i databasen
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) return res.status(401).json({ success: false });
+  
   res.json({ success: true });
 });
 
 app.get("/api/overview/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
+  const user = await User.findOne({ username: req.params.username });
   if (!user) return res.status(401).json({ error: "Obehörig" });
+
+  const isMatch = await bcrypt.compare(req.params.password, user.password);
+  if (!isMatch) return res.status(401).json({ error: "Fel lösenord" });
 
   const now = new Date();
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
@@ -104,8 +118,8 @@ app.get("/api/overview/:username/:password", async (req, res) => {
 });
 
 app.post("/api/spend/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.remainingBudget -= req.body.amount;
     user.transactions.push({ 
       amount: req.body.amount, 
@@ -118,8 +132,8 @@ app.post("/api/spend/:username/:password", async (req, res) => {
 });
 
 app.post("/api/set-theme/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.theme = req.body.theme;
     await user.save();
     res.json({ success: true });
@@ -127,8 +141,8 @@ app.post("/api/set-theme/:username/:password", async (req, res) => {
 });
 
 app.post("/api/set-budget/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.initialBudget = req.body.budget;
     user.remainingBudget = req.body.budget;
     user.transactions = [];
@@ -138,8 +152,8 @@ app.post("/api/set-budget/:username/:password", async (req, res) => {
 });
 
 app.post("/api/set-payday/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.targetPayday = req.body.payday;
     await user.save();
     res.json({ success: true });
@@ -147,8 +161,8 @@ app.post("/api/set-payday/:username/:password", async (req, res) => {
 });
 
 app.post("/api/archive-month/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.totalSavings += user.remainingBudget;
     user.monthsArchived += 1;
     user.remainingBudget = user.initialBudget;
@@ -159,8 +173,8 @@ app.post("/api/archive-month/:username/:password", async (req, res) => {
 });
 
 app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username, password: req.params.password });
-  if (user) {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
     const tx = user.transactions.id(req.params.id);
     if (tx) {
       user.remainingBudget += tx.amount;
@@ -171,7 +185,7 @@ app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) =
   }
 });
 
-// --- FRONTEND ---
+// --- FRONTEND (Bevarad från tidigare) ---
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -180,12 +194,8 @@ app.get("/", (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
         <style>
-          :root {
-            --bg: #f0f2f5; --card: white; --text: #333; --sub: #666; --border: #eee; --input: #f9f9f9;
-          }
-          body.dark-mode {
-            --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --sub: #aaa; --border: #333; --input: #2a2a2a;
-          }
+          :root { --bg: #f0f2f5; --card: white; --text: #333; --sub: #666; --border: #eee; --input: #f9f9f9; }
+          body.dark-mode { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --sub: #aaa; --border: #333; --input: #2a2a2a; }
           body { font-family: -apple-system, sans-serif; text-align: center; background: var(--bg); color: var(--text); margin: 0; padding-bottom: 80px; transition: 0.3s; }
           .card { background: var(--card); padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 20px auto; }
           h1 { font-size: 50px; margin: 5px 0; color: #2ecc71; letter-spacing: -2px; }
@@ -231,12 +241,10 @@ app.get("/", (req, res) => {
               <h1 id="daily">...</h1>
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: var(--sub); margin-bottom: 20px;"></p>
-              
               <div id="categorySummary" style="margin: 15px 0; text-align: left; background: var(--input); padding: 15px; border-radius: 15px;">
                 <p style="font-size: 11px; font-weight: bold; margin-bottom: 10px;">DENNA PERIOD:</p>
                 <div id="summaryList"></div>
               </div>
-
               <div class="section">
                 <select id="cat">
                   <option value="Övrigt">Välj kategori...</option>
@@ -247,7 +255,7 @@ app.get("/", (req, res) => {
                   <option value="Hyra">🏠 Hem & Hyra</option>
                   <option value="Nöje">🎉 Nöje</option>
                 </select>
-                <input type="text" id="desc" placeholder="Vad? (valfritt)">
+                <input type="text" id="desc" placeholder="Vad?">
                 <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
                 <button onclick="action('spend', 'amount')">Spara köp</button>
               </div>
@@ -257,12 +265,12 @@ app.get("/", (req, res) => {
           <div id="view-settings" class="view">
             <div class="card">
               <h2 style="margin-top:0">Inställningar</h2>
-              <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 25px;">🌙 Mörkt läge: Av</button>
-              <input type="number" id="newBudget" placeholder="Ny månadsbudget">
+              <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 25px;">🌙 Mörkt läge</button>
+              <input type="number" id="newBudget" placeholder="Ny budget">
               <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Sätt budget</button>
-              <input type="number" id="newPayday" placeholder="Lönedag (t.ex. 25)">
+              <input type="number" id="newPayday" placeholder="Lönedag">
               <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
-              <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
+              <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad</button>
               <button onclick="logout()" style="background:#888">Logga ut</button>
             </div>
           </div>
@@ -283,13 +291,9 @@ app.get("/", (req, res) => {
             if(theme === "dark") {
               document.body.classList.add('dark-mode');
               document.getElementById('themeBtn').innerText = "☀️ Mörkt läge: På";
-              document.getElementById('themeBtn').style.background = "#ddd";
-              document.getElementById('themeBtn').style.color = "#333";
             } else {
               document.body.classList.remove('dark-mode');
               document.getElementById('themeBtn').innerText = "🌙 Mörkt läge: Av";
-              document.getElementById('themeBtn').style.background = "#444";
-              document.getElementById('themeBtn').style.color = "white";
             }
           }
 
@@ -339,6 +343,7 @@ app.get("/", (req, res) => {
 
           async function update() {
             const res = await fetch('/api/overview/' + curUser + '/' + curPass);
+            if(!res.ok) return logout();
             const data = await res.json();
             applyTheme(data.theme);
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
@@ -347,7 +352,6 @@ app.get("/", (req, res) => {
             document.getElementById('stats').innerHTML = 'Kvar: <b>' + data.remainingBudget + ' kr</b> | Lön: ' + data.paydayDate;
             document.getElementById('bar').style.width = data.usedPercent + '%';
             
-            // Beräkna kategorisummering
             const cats = {};
             data.transactions.forEach(t => {
               const c = t.category || "Övrigt";
@@ -395,7 +399,7 @@ app.get("/", (req, res) => {
           }
 
           async function archive() {
-            if(confirm("Spara överskottet till nästa månad?")) {
+            if(confirm("Spara månaden?")) {
               await fetch('/api/archive-month/' + curUser + '/' + curPass, { method: 'POST' });
               update(); showToast("Månaden klar!"); showTab('home');
             }
