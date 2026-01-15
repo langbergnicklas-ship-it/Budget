@@ -17,7 +17,7 @@ mongoose.connect(MONGODB_URI)
 // --- BREVO API MEJL-FUNKTION ---
 async function sendWelcomeEmail(toEmail, username, password) {
   try {
-    await fetch("https://api.brevo.com/v3/smtp/email", {
+    const response = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
         "accept": "application/json",
@@ -31,6 +31,8 @@ async function sendWelcomeEmail(toEmail, username, password) {
         htmlContent: `<h2>Hej ${username}!</h2><p>Här är dina uppgifter:</p><ul><li><b>Användarnamn:</b> ${username}</li><li><b>Lösenord:</b> ${password}</li></ul><p><a href="https://budget-epew.onrender.com/">Öppna appen här</a></p>`
       })
     });
+    const result = await response.json();
+    console.log("Brevo API svar:", result);
   } catch (error) {
     console.error("API Mejlfel:", error);
   }
@@ -59,7 +61,7 @@ const userSchema = new mongoose.Schema({
   initialBudget: { type: Number, default: 12000 },
   remainingBudget: { type: Number, default: 12000 },
   targetPayday: { type: Number, default: 25 },
-  fixedExpenses: [fixedExpenseSchema], // NYTT: Fasta utgifter
+  fixedExpenses: [fixedExpenseSchema],
   transactions: [transactionSchema]
 });
 
@@ -95,8 +97,6 @@ app.get("/api/overview/:username/:password", async (req, res) => {
   }
 
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
-  
-  // Beräkna fasta kostnader
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   
   res.json({
@@ -197,7 +197,6 @@ app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) =
   }
 });
 
-// --- FRONTEND ---
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -298,7 +297,7 @@ app.get("/", (req, res) => {
             <div class="card">
               <h2>Inställningar</h2>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
-              <input type="number" id="newBudget" placeholder="Ny månadsbudget">
+              <input type="number" id="newBudget" placeholder="Ny budget">
               <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Uppdatera budget</button>
               <input type="number" id="newPayday" placeholder="Lönedag">
               <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
@@ -378,7 +377,6 @@ app.get("/", (req, res) => {
             document.getElementById('stats').innerHTML = 'Kvar (efter fasta): <b>' + (data.remainingBudget - data.totalFixed) + ' kr</b> | Lön: ' + data.paydayDate;
             document.getElementById('bar').style.width = data.usedPercent + '%';
             
-            // Visuell kategorilista
             const cats = {};
             data.transactions.forEach(t => { const c = t.category || "Övrigt"; cats[c] = (cats[c] || 0) + t.amount; });
             const maxVal = Math.max(...Object.values(cats), 1);
@@ -391,7 +389,6 @@ app.get("/", (req, res) => {
               </div>
             \`).join('');
 
-            // Fasta utgifter lista
             document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`
               <div class="fixed-item">
                 <span>\${f.name}</span>
