@@ -168,6 +168,38 @@ app.post("/api/set-theme/:username/:password", async (req, res) => {
   }
 });
 
+app.post("/api/set-budget/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
+    user.initialBudget = req.body.budget;
+    user.remainingBudget = req.body.budget;
+    user.transactions = [];
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/set-payday/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
+    user.targetPayday = req.body.payday;
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
+app.post("/api/archive-month/:username/:password", async (req, res) => {
+  const user = await User.findOne({ username: req.params.username });
+  if (user && await bcrypt.compare(req.params.password, user.password)) {
+    user.totalSavings += user.remainingBudget;
+    user.monthsArchived += 1;
+    user.remainingBudget = user.initialBudget;
+    user.transactions = [];
+    await user.save();
+    res.json({ success: true });
+  }
+});
+
 app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
   const user = await User.findOne({ username: req.params.username });
   if (user && await bcrypt.compare(req.params.password, user.password)) {
@@ -268,6 +300,14 @@ app.get("/", (req, res) => {
               <h2>Inställningar</h2>
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
+              
+              <input type="number" id="newBudget" placeholder="Ny månadsbudget (kr)">
+              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Uppdatera budget</button>
+              
+              <input type="number" id="newPayday" placeholder="Ny lönedag (t.ex. 25)">
+              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
+              
+              <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
             </div>
           </div>
@@ -338,6 +378,19 @@ app.get("/", (req, res) => {
             update();
           }
 
+          async function action(type, key) {
+            const inputId = key === 'budget' ? 'newBudget' : 'newPayday';
+            const val = document.getElementById(inputId).value;
+            if(!val) return;
+            const body = {};
+            if(key === 'budget') body.budget = Number(val);
+            if(key === 'payday') body.payday = Number(val);
+            await fetch('/api/'+type+'/'+curUser+'/'+curPass, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+            document.getElementById(inputId).value = '';
+            update(); showToast("Sparat!");
+          }
+
+          async function archive() { if(confirm("Spara månaden?")) { await fetch('/api/archive-month/'+curUser+'/'+curPass, {method:'POST'}); update(); } }
           function logout() { localStorage.clear(); location.reload(); }
         </script>
       </body>
