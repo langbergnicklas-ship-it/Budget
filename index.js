@@ -25,7 +25,7 @@ async function sendEmail(toEmail, subject, html) {
         "content-type": "application/json"
       },
       body: JSON.stringify({
-        sender: { name: "Budget Appen", email: process.env.SENDER_EMAIL },
+        sender: { name: "Budget kollen", email: process.env.SENDER_EMAIL },
         to: [{ email: toEmail }],
         subject: subject,
         htmlContent: html
@@ -73,7 +73,7 @@ app.post("/api/login", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     user = await User.create({ username, password: hashedPassword, email });
     if (email && process.env.BREVO_API_KEY) {
-      sendEmail(email, "Välkommen! 💰", `<h2>Hej ${username}!</h2><p>Ditt konto är redo.</p>`);
+      sendEmail(email, "Välkommen till Budget kollen! 💰", `<h2>Hej ${username}!</h2><p>Ditt konto är nu redo.</p>`);
     }
     return res.json({ success: true });
   }
@@ -106,7 +106,6 @@ app.get("/api/overview/:username/:password", async (req, res) => {
     fixedExpenses: user.fixedExpenses,
     streak: user.streak || 0,
     milestones: user.milestones || [],
-    avgSavings: user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0,
     usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
     transactions: user.transactions,
     theme: user.theme || "light"
@@ -141,50 +140,34 @@ app.post("/api/send-summary/:username/:password", async (req, res) => {
   if (user && await bcrypt.compare(req.params.password, user.password) && user.email) {
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo);
-    const totalSpent = weeklyTx.reduce((sum, t) => sum + t.amount, 0);
-    const html = `<h2>Din Veckokoll 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`;
-    await sendEmail(user.email, "Veckosummering!", html);
+    const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0);
+    const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Aktuell streak: 🔥 <b>${user.streak}</b></p>`;
+    await sendEmail(user.email, "Sammanfattning av din vecka!", html);
     res.json({ success: true });
   }
 });
 
-// --- STANDARD RUTINER ---
 app.post("/api/add-fixed/:username/:password", async (req, res) => {
   const user = await User.findOne({ username: req.params.username });
   if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.fixedExpenses.push(req.body); await user.save(); res.json({ success: true });
   }
 });
+
 app.delete("/api/delete-fixed/:username/:password/:id", async (req, res) => {
   const user = await User.findOne({ username: req.params.username });
   if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.fixedExpenses.pull(req.params.id); await user.save(); res.json({ success: true });
   }
 });
+
 app.post("/api/set-theme/:username/:password", async (req, res) => {
   const user = await User.findOne({ username: req.params.username });
   if (user && await bcrypt.compare(req.params.password, user.password)) {
     user.theme = req.body.theme; await user.save(); res.json({ success: true });
   }
 });
-app.post("/api/set-budget/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.initialBudget = req.body.budget; user.remainingBudget = req.body.budget; user.transactions = []; await user.save(); res.json({ success: true });
-  }
-});
-app.post("/api/set-payday/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.targetPayday = req.body.payday; await user.save(); res.json({ success: true });
-  }
-});
-app.post("/api/archive-month/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.totalSavings += user.remainingBudget; user.remainingBudget = user.initialBudget; user.transactions = []; await user.save(); res.json({ success: true });
-  }
-});
+
 app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
   const user = await User.findOne({ username: req.params.username });
   if (user && await bcrypt.compare(req.params.password, user.password)) {
@@ -205,6 +188,7 @@ app.get("/", (req, res) => {
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+        <title>Budget kollen</title>
         <style>
           :root { --bg: #f0f2f5; --card: white; --text: #333; --sub: #666; --border: #eee; --input: #f9f9f9; --primary: #0084ff; --plus: #2ecc71; }
           body.dark-mode { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --sub: #aaa; --border: #333; --input: #2a2a2a; }
@@ -225,8 +209,7 @@ app.get("/", (req, res) => {
           .tab-btn.active { color: var(--primary); }
           .history-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); text-align: left; font-size: 14px; }
           .cat-tag { font-size: 10px; background: var(--border); padding: 2px 6px; border-radius: 4px; color: var(--sub); margin-right: 5px; }
-          .cat-bar-bg { background: var(--border); height: 6px; border-radius: 3px; margin-top: 4px; overflow: hidden; }
-          .cat-bar-fill { height: 100%; background: var(--primary); border-radius: 3px; }
+          .income-text { color: var(--plus); font-weight: bold; }
           .view { display: none; } .view.active { display: block; }
           #loginScreen { padding-top: 50px; }
         </style>
@@ -235,10 +218,10 @@ app.get("/", (req, res) => {
         <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:12px 25px; border-radius:30px; display:none; z-index:1000;">Sparat!</div>
         <div id="loginScreen">
           <div class="card">
-            <h2>Budget App</h2>
+            <h2 style="margin-bottom:20px">Budget kollen</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="E-post">
+            <input type="email" id="emailIn" placeholder="Din e-post">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
@@ -255,11 +238,7 @@ app.get("/", (req, res) => {
               <h1 id="daily">...</h1>
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: var(--sub); margin-bottom: 20px;"></p>
-              <div id="visualSummary" style="text-align: left; background: var(--input); padding: 15px; border-radius: 15px; margin-bottom: 20px;">
-                <p style="font-size: 11px; font-weight: bold; margin-bottom: 12px; color: var(--sub)">UTGIFTSKOLL</p>
-                <div id="catVisualList"></div>
-              </div>
-              <div style="margin-top:25px; border-top:1px solid var(--border); padding-top:20px">
+              <div class="section">
                 <select id="cat">
                   <option value="Hushåll">🧼 Hushåll</option><option value="Mat">🍔 Mat</option>
                   <option value="Shopping">🛍️ Shopping</option><option value="Transport">🚗 Transport</option>
@@ -289,11 +268,6 @@ app.get("/", (req, res) => {
               <h2>Inställningar</h2>
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
-              <input type="number" id="newBudget" placeholder="Ny budget">
-              <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Uppdatera budget</button>
-              <input type="number" id="newPayday" placeholder="Lönedag">
-              <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
-              <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
             </div>
           </div>
@@ -338,14 +312,8 @@ app.get("/", (req, res) => {
             document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate;
             document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join('');
             
-            const cats = {}; data.transactions.forEach(t => { const c = t.category || "Övrigt"; cats[c] = (cats[c] || 0) + (t.isIncome ? 0 : t.amount); });
-            const max = Math.max(...Object.values(cats), 1);
-            document.getElementById('catVisualList').innerHTML = Object.entries(cats).map(([n, s]) => \`
-              <div class="cat-row"><div style="display:flex; justify-content:space-between; font-size:11px"><span>\${n}</span><b>\${s} kr</b></div>
-              <div class="cat-bar-bg"><div class="cat-bar-fill" style="width:\${(s/max)*100}%"></div></div></div>\`).join('');
-
             document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
-            document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (\${t.isIncome ? '+' : '-'}\${t.amount} kr)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
+            document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
           }
 
           async function saveTx(isIncome) {
@@ -370,13 +338,6 @@ app.get("/", (req, res) => {
             update();
           }
 
-          async function action(type, key) {
-            const val = document.getElementById('newBudget').value;
-            await fetch('/api/'+type+'/'+curUser+'/'+curPass, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({budget: Number(val)}) });
-            update(); showToast("Budget uppdaterad!"); showTab('home');
-          }
-
-          async function archive() { if(confirm("Spara månaden?")) { await fetch('/api/archive-month/'+curUser+'/'+curPass, {method:'POST'}); update(); } }
           function logout() { localStorage.clear(); location.reload(); }
         </script>
       </body>
