@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken"); // NYTT: För säker inloggning
 const app = express();
 
 app.use(cors());
@@ -9,14 +10,16 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
+const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen"; // Byt gärna denna i Render environment variables
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// --- MEJL-MOTOR (Brevo API) ---
+// --- MEJL-FUNKTION ---
 async function sendEmail(toEmail, subject, html) {
   try {
+    if (!process.env.BREVO_API_KEY) return;
     await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
@@ -36,7 +39,7 @@ async function sendEmail(toEmail, subject, html) {
   }
 }
 
-// --- DATA SCHEMA ---
+// --- SCHEMA ---
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -64,63 +67,103 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
+// --- MIDDLEWARE (Säkerhetsvakt) ---
+// Denna funktion kollar att användaren har en giltig Token innan de får göra något
+const authenticateToken = (req, res, next) => {
+  const token = req.headers['authorization'];
+  if (!token) return res.status(401).json({ error: "Ingen token, logga in." });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: "Ogiltig token." });
+    req.user = user; // Spara användar-ID i requesten
+    next();
+  });
+};
+
 // --- API ROUTES ---
 
-app.post("/api/login", async (req, res) => {
-  const { username, password, email } = req.body;
-  let user = await User.findOne({ username });
-  if (!user) {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    user = await User.create({ username, password: hashedPassword, email });
-    if (email && process.env.BREVO_API_KEY) {
-      sendEmail(email, "Välkommen till Budget kollen! 💰", `<h2>Hej ${username}!</h2><p>Ditt konto är nu redo.</p>`);
+// 1. LOGIN / REGISTRERING (Enda stället vi skickar lösenord)
+app.post("/api/auth", async (req, res) => {
+  try {
+    const { username, password, email } = req.body;
+    if(!username || !password) return res.status(400).json({ error: "Fyll i allt" });
+
+    let user = await User.findOne({ username });
+    
+    // Om användaren inte finns -> SKAPA NY
+    if (!user) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      user = await User.create({ username, password: hashedPassword, email });
+      if (email && process.env.BREVO_API_KEY) {
+        sendEmail(email, "Välkommen till Budget kollen!", `<h2>Hej ${username}!</h2><p>Konto skapat.</p>`);
+      }
+    } else {
+      // Om användaren finns -> KOLLA LÖSENORD
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) return res.status(401).json({ error: "Fel lösenord" });
     }
-    return res.json({ success: true });
+
+    // SKAPA TOKEN (Säkerhetsnyckel)
+    const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ success: true, token, username: user.username });
+
+  } catch (err) {
+    res.status(500).json({ error: "Serverfel" });
   }
-  const isMatch = await bcrypt.compare(password, user.password);
-  if (!isMatch) return res.status(401).json({ success: false });
-  res.json({ success: true });
 });
 
-app.get("/api/overview/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (!user || !(await bcrypt.compare(req.params.password, user.password))) return res.status(401).json({ error: "Obehörig" });
+// 2. HÄMTA ÖVERSIKT (Skyddad med Token)
+app.get("/api/overview", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ error: "Användare saknas" });
 
-  const now = new Date();
-  let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
-  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
-  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
-  if (now >= payday.setHours(23, 59, 59)) payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
+    const now = new Date();
+    let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
+    if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+    else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+    if (now >= payday.setHours(23, 59, 59)) payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
 
-  const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
-  const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
+    const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
+    const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
 
-  res.json({
-    dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft),
-    daysLeft,
-    paydayDate: payday.toLocaleDateString('sv-SE'),
-    remainingBudget: user.remainingBudget,
-    initialBudget: user.initialBudget,
-    totalSavings: user.totalSavings,
-    totalFixed,
-    fixedExpenses: user.fixedExpenses,
-    streak: user.streak || 0,
-    milestones: user.milestones || [],
-    usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
-    transactions: user.transactions,
-    theme: user.theme || "light"
-  });
+    // FIX: Säkrare uträkning av snittsparande
+    const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
+
+    res.json({
+      dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft),
+      daysLeft,
+      paydayDate: payday.toLocaleDateString('sv-SE'),
+      remainingBudget: user.remainingBudget,
+      initialBudget: user.initialBudget,
+      totalSavings: user.totalSavings,
+      avgSavings, // Den fixade variabeln
+      totalFixed,
+      fixedExpenses: user.fixedExpenses,
+      streak: user.streak || 0,
+      milestones: user.milestones || [],
+      usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
+      transactions: user.transactions,
+      theme: user.theme || "light"
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Kunde inte hämta data" });
+  }
 });
 
-app.post("/api/spend/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
+// 3. SPARA KÖP / INKOMST (Skyddad)
+app.post("/api/spend", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
     const amount = Number(req.body.amount);
+    if (!amount) return res.status(400).json({ error: "Belopp saknas" });
+
     if (req.body.isIncome) user.remainingBudget += amount;
     else user.remainingBudget -= amount;
     
     user.transactions.push(req.body);
 
+    // Streak logic
     const today = new Date().toDateString();
     if (user.lastActive?.toDateString() !== today) {
       user.streak = (user.streak || 0) + 1;
@@ -132,87 +175,76 @@ app.post("/api/spend/:username/:password", async (req, res) => {
 
     await user.save();
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Kunde inte spara" });
   }
 });
 
-app.post("/api/send-summary/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password) && user.email) {
+// --- ÖVRIGA SKYDDADE ROUTES ---
+
+app.post("/api/send-summary", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  if (user.email) {
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo);
     const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0);
-    const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Aktuell streak: 🔥 <b>${user.streak}</b></p>`;
+    const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`;
     await sendEmail(user.email, "Sammanfattning av din vecka!", html);
-    res.json({ success: true });
   }
+  res.json({ success: true });
 });
 
-app.post("/api/add-fixed/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.fixedExpenses.push(req.body); await user.save(); res.json({ success: true });
-  }
+app.post("/api/add-fixed", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  user.fixedExpenses.push(req.body); await user.save(); res.json({ success: true });
 });
 
-app.delete("/api/delete-fixed/:username/:password/:id", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.fixedExpenses.pull(req.params.id); await user.save(); res.json({ success: true });
-  }
+app.delete("/api/delete-fixed/:id", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  user.fixedExpenses.pull(req.params.id); await user.save(); res.json({ success: true });
 });
 
-app.post("/api/set-theme/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.theme = req.body.theme; await user.save(); res.json({ success: true });
-  }
+app.post("/api/set-theme", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  user.theme = req.body.theme; await user.save(); res.json({ success: true });
 });
 
-app.post("/api/set-budget/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.initialBudget = req.body.budget;
-    user.remainingBudget = req.body.budget;
-    user.transactions = [];
-    await user.save();
-    res.json({ success: true });
-  }
+app.post("/api/set-budget", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  user.initialBudget = req.body.budget;
+  user.remainingBudget = req.body.budget;
+  user.transactions = [];
+  await user.save();
+  res.json({ success: true });
 });
 
-app.post("/api/set-payday/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.targetPayday = req.body.payday;
-    await user.save();
-    res.json({ success: true });
-  }
+app.post("/api/set-payday", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  user.targetPayday = req.body.payday; await user.save(); res.json({ success: true });
 });
 
-app.post("/api/archive-month/:username/:password", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    user.totalSavings += user.remainingBudget;
-    user.monthsArchived += 1;
-    user.remainingBudget = user.initialBudget;
-    user.transactions = [];
-    await user.save();
-    res.json({ success: true });
-  }
+app.post("/api/archive-month", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  user.totalSavings += user.remainingBudget;
+  user.monthsArchived += 1;
+  user.remainingBudget = user.initialBudget;
+  user.transactions = [];
+  await user.save();
+  res.json({ success: true });
 });
 
-app.delete("/api/delete-transaction/:username/:password/:id", async (req, res) => {
-  const user = await User.findOne({ username: req.params.username });
-  if (user && await bcrypt.compare(req.params.password, user.password)) {
-    const tx = user.transactions.id(req.params.id);
-    if (tx) {
-      if (tx.isIncome) user.remainingBudget -= tx.amount;
-      else user.remainingBudget += tx.amount;
-      tx.deleteOne(); await user.save();
-    }
-    res.json({ success: true });
+app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => {
+  const user = await User.findById(req.user.id);
+  const tx = user.transactions.id(req.params.id);
+  if (tx) {
+    if (tx.isIncome) user.remainingBudget -= tx.amount;
+    else user.remainingBudget += tx.amount;
+    tx.deleteOne(); await user.save();
   }
+  res.json({ success: true });
 });
 
+// --- FRONTEND ---
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -236,6 +268,7 @@ app.get("/", (req, res) => {
           .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
           button { padding: 15px; background: var(--primary); color: white; border: none; border-radius: 12px; font-weight: bold; width: 100%; cursor: pointer; }
           button.plus-btn { background: var(--plus); }
+          button.affiliate-btn { background: #8e44ad; color: white; margin-bottom: 8px; }
           .tab-bar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; border-top: 1px solid var(--border); padding: 10px 0; z-index: 999; }
           .tab-btn { flex: 1; background: none; color: var(--sub); border: none; font-size: 12px; font-weight: bold; }
           .tab-btn.active { color: var(--primary); }
@@ -248,15 +281,17 @@ app.get("/", (req, res) => {
       </head>
       <body>
         <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:12px 25px; border-radius:30px; display:none; z-index:1000;">Sparat!</div>
+        
         <div id="loginScreen">
           <div class="card">
             <h2 style="margin-bottom:20px">Budget kollen</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="Din e-post">
+            <input type="email" id="emailIn" placeholder="Din e-post (valfritt)">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
+
         <div id="mainContent" style="display:none">
           <div id="view-home" class="view active">
             <div class="card">
@@ -286,6 +321,7 @@ app.get("/", (req, res) => {
               <div id="list" style="margin-top: 20px;"></div>
             </div>
           </div>
+
           <div id="view-fixed" class="view">
             <div class="card">
               <h2>Fasta utgifter</h2>
@@ -295,9 +331,16 @@ app.get("/", (req, res) => {
               <div id="fixedList" style="margin-top: 20px;"></div>
             </div>
           </div>
+
           <div id="view-settings" class="view">
             <div class="card">
               <h2>Inställningar</h2>
+              <div style="background:var(--input); padding:15px; border-radius:15px; margin-bottom:20px;">
+                <p style="font-weight:bold; font-size:12px; margin-top:0;">SPARA PENGAR & STÖTTA</p>
+                <button class="affiliate-btn" onclick="window.open('https://www.compricer.se', '_blank')">⚡ Jämför elavtal</button>
+                <button class="affiliate-btn" onclick="window.open('https://www.buymeacoffee.com', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
+              </div>
+
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
               
@@ -311,38 +354,46 @@ app.get("/", (req, res) => {
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
             </div>
           </div>
+
           <div class="tab-bar">
             <button class="tab-btn active" id="btn-home" onclick="showTab('home')">🏠 Hem</button>
             <button class="tab-btn" id="btn-fixed" onclick="showTab('fixed')">📜 Fasta</button>
             <button class="tab-btn" id="btn-settings" onclick="showTab('settings')">⚙️ Inställningar</button>
           </div>
         </div>
-        <script>
-          let curUser = localStorage.getItem('budget_user'), curPass = localStorage.getItem('budget_pass');
-          if(curUser && curPass) showApp();
 
-          function showToast(msg) {
-            const t = document.getElementById('toast'); t.innerText = msg; t.style.display = 'block';
-            setTimeout(() => t.style.display = 'none', 2500);
+        <script>
+          let token = localStorage.getItem('budget_token');
+          if(token) showApp();
+
+          function api(url, method='GET', body=null) {
+            const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } };
+            if(body) opts.body = JSON.stringify(body);
+            return fetch(url, opts);
           }
 
           async function login() {
             const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value;
-            const res = await fetch('/api/login', {
-              method: 'POST', headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ username: u, password: p, email: e })
+            const res = await fetch('/api/auth', { 
+              method: 'POST', headers: {'Content-Type': 'application/json'}, 
+              body: JSON.stringify({ username: u, password: p, email: e }) 
             });
-            if(res.ok) { localStorage.setItem('budget_user', u); localStorage.setItem('budget_pass', p); curUser = u; curPass = p; showApp(); }
-            else alert("Fel!");
+            const data = await res.json();
+            if(res.ok) { 
+              localStorage.setItem('budget_token', data.token); 
+              token = data.token; 
+              showApp(); 
+            } else alert(data.error || "Fel!");
           }
 
           function showApp() { document.getElementById('loginScreen').style.display='none'; document.getElementById('mainContent').style.display='block'; update(); }
           function showTab(t) { document.querySelectorAll('.view').forEach(v=>v.classList.remove('active')); document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.getElementById('view-'+t).classList.add('active'); document.getElementById('btn-'+t).classList.add('active'); }
 
           async function update() {
-            const res = await fetch('/api/overview/'+curUser+'/'+curPass);
+            const res = await api('/api/overview');
             if(!res.ok) return logout();
             const data = await res.json();
+            
             document.body.classList.toggle('dark-mode', data.theme === 'dark');
             document.getElementById('daily').innerText = data.dailyLimit + ':-';
             document.getElementById('totalSavings').innerText = data.totalSavings;
@@ -358,40 +409,42 @@ app.get("/", (req, res) => {
 
           async function saveTx(isIncome) {
             const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value;
-            await fetch('/api/spend/'+curUser+'/'+curPass, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({amount:Number(amt), category:cat, description:desc, isIncome}) });
+            await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome});
             document.getElementById('amt').value=''; update(); showToast("Sparat!");
           }
 
           async function addFixed() {
             const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value);
-            await fetch('/api/add-fixed/'+curUser+'/'+curPass, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, amount}) });
+            await api('/api/add-fixed', 'POST', {name, amount});
             update(); showToast("Fast utgift tillagd!");
           }
 
-          async function deleteFixed(id) { await fetch('/api/delete-fixed/'+curUser+'/'+curPass+'/'+id, {method:'DELETE'}); update(); }
-          async function deleteItem(id) { await fetch('/api/delete-transaction/'+curUser+'/'+curPass+'/'+id, {method:'DELETE'}); update(); }
-          async function sendSummary() { await fetch('/api/send-summary/'+curUser+'/'+curPass, {method:'POST'}); showToast("Skickat!"); }
+          async function action(type, key) {
+            const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value;
+            if(!val) return;
+            const body = {}; body[key] = Number(val);
+            await api('/api/set-'+type, 'POST', body);
+            update(); showToast("Uppdaterat!");
+          }
+
+          async function deleteFixed(id) { await api('/api/delete-fixed/'+id, 'DELETE'); update(); }
+          async function deleteItem(id) { await api('/api/delete-transaction/'+id, 'DELETE'); update(); }
+          async function sendSummary() { await api('/api/send-summary', 'POST'); showToast("Skickat!"); }
           
           async function toggleTheme() { 
             const theme = document.body.classList.contains('dark-mode') ? 'light' : 'dark';
-            await fetch('/api/set-theme/'+curUser+'/'+curPass, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({theme})});
+            await api('/api/set-theme', 'POST', {theme});
             update();
           }
 
-          async function action(type, key) {
-            const inputId = key === 'budget' ? 'newBudget' : 'newPayday';
-            const val = document.getElementById(inputId).value;
-            if(!val) return;
-            const body = {};
-            if(key === 'budget') body.budget = Number(val);
-            if(key === 'payday') body.payday = Number(val);
-            await fetch('/api/'+type+'/'+curUser+'/'+curPass, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-            document.getElementById(inputId).value = '';
-            update(); showToast("Sparat!");
+          async function archive() { if(confirm("Spara månaden?")) { await api('/api/archive-month', 'POST'); update(); } }
+          
+          function logout() { localStorage.removeItem('budget_token'); location.reload(); }
+          
+          function showToast(msg) {
+            const t = document.getElementById('toast'); t.innerText = msg; t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 2500);
           }
-
-          async function archive() { if(confirm("Spara månaden?")) { await fetch('/api/archive-month/'+curUser+'/'+curPass, {method:'POST'}); update(); } }
-          function logout() { localStorage.clear(); location.reload(); }
         </script>
       </body>
     </html>
