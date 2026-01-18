@@ -16,142 +16,89 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// --- MEJL-MOTOR (Brevo API) ---
+// --- MEJL-MOTOR ---
 async function sendEmail(toEmail, subject, html) {
   try {
     if (!process.env.BREVO_API_KEY) return;
     await fetch("https://api.brevo.com/v3/smtp/email", {
-      method: "POST",
-      headers: {
-        "accept": "application/json",
-        "api-key": process.env.BREVO_API_KEY,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        sender: { name: "Budget kollen", email: process.env.SENDER_EMAIL },
-        to: [{ email: toEmail }],
-        subject: subject,
-        htmlContent: html
-      })
+      method: "POST", headers: { "accept": "application/json", "api-key": process.env.BREVO_API_KEY, "content-type": "application/json" },
+      body: JSON.stringify({ sender: { name: "Budget kollen", email: process.env.SENDER_EMAIL }, to: [{ email: toEmail }], subject: subject, htmlContent: html })
     });
-  } catch (error) {
-    console.error("Mejlfel:", error);
-  }
+  } catch (error) { console.error("Mejlfel:", error); }
 }
 
-// --- DATA SCHEMA ---
-const transactionSchema = new mongoose.Schema({
-  description: String,
-  amount: Number,
-  category: { type: String, default: "Övrigt" },
-  isIncome: { type: Boolean, default: false },
-  timestamp: { type: Date, default: Date.now }
-});
-
-const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  email: { type: String },
-  theme: { type: String, default: "light" },
-  totalSavings: { type: Number, default: 0 },
-  monthsArchived: { type: Number, default: 0 },
-  initialBudget: { type: Number, default: 12000 },
-  remainingBudget: { type: Number, default: 12000 },
-  targetPayday: { type: Number, default: 25 },
-  fixedExpenses: [{ name: String, amount: Number }],
-  transactions: [transactionSchema],
-  streak: { type: Number, default: 0 },
-  lastActive: { type: Date },
-  milestones: { type: [String], default: [] }
-});
-
+// --- SCHEMA ---
+const transactionSchema = new mongoose.Schema({ description: String, amount: Number, category: { type: String, default: "Övrigt" }, isIncome: { type: Boolean, default: false }, timestamp: { type: Date, default: Date.now } });
+const userSchema = new mongoose.Schema({ username: { type: String, required: true, unique: true }, password: { type: String, required: true }, email: String, theme: { type: String, default: "light" }, totalSavings: { type: Number, default: 0 }, monthsArchived: { type: Number, default: 0 }, initialBudget: { type: Number, default: 12000 }, remainingBudget: { type: Number, default: 12000 }, targetPayday: { type: Number, default: 25 }, fixedExpenses: [{ name: String, amount: Number }], transactions: [transactionSchema], streak: { type: Number, default: 0 }, lastActive: Date, milestones: { type: [String], default: [] } });
 const User = mongoose.model("User", userSchema);
 
 // --- MIDDLEWARE ---
 const authenticateToken = (req, res, next) => {
   const token = req.headers['authorization'];
   if (!token) return res.status(401).json({ error: "Ingen token" });
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Ogiltig token" });
-    req.user = user;
-    next();
-  });
+  jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- API ROUTES ---
+// --- APP KONFIGURATION (MANIFEST & IKONER) ---
+app.get('/manifest.json', (req, res) => {
+  res.json({
+    "name": "Budget kollen",
+    "short_name": "Budget",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#0084ff",
+    "icons": [
+      { "src": "https://cdn-icons-png.flaticon.com/512/2953/2953363.png", "sizes": "192x192", "type": "image/png" },
+      { "src": "https://cdn-icons-png.flaticon.com/512/2953/2953363.png", "sizes": "512x512", "type": "image/png" }
+    ]
+  });
+});
 
+app.get('/service-worker.js', (req, res) => {
+  res.set('Content-Type', 'application/javascript');
+  res.send(`self.addEventListener('install', (e) => {}); self.addEventListener('fetch', (e) => {});`);
+});
+
+// --- API ROUTES ---
 app.post("/api/auth", async (req, res) => {
   try {
     const { username, password, email } = req.body;
     let user = await User.findOne({ username });
-    
     if (!user) {
       const hashedPassword = await bcrypt.hash(password, 10);
       user = await User.create({ username, password: hashedPassword, email });
-      if (email && process.env.BREVO_API_KEY) {
-        sendEmail(email, "Välkommen till Budget kollen! 💰", `<h2>Hej ${username}!</h2><p>Ditt konto är redo.</p>`);
-      }
+      if (email && process.env.BREVO_API_KEY) sendEmail(email, "Välkommen till Budget kollen! 💰", \`<h2>Hej \${username}!</h2><p>Ditt konto är redo.</p>\`);
     } else {
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) return res.status(401).json({ error: "Fel lösenord" });
+      if (!(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Fel lösenord" });
     }
-
     const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, username: user.username });
-  } catch (err) {
-    res.status(500).json({ error: "Serverfel" });
-  }
+  } catch (err) { res.status(500).json({ error: "Serverfel" }); }
 });
 
 app.get("/api/overview", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   const now = new Date();
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
-  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
-  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2); else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   if (now >= payday.setHours(23, 59, 59)) payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
-
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
-
-  res.json({
-    dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft),
-    daysLeft,
-    paydayDate: payday.toLocaleDateString('sv-SE'),
-    remainingBudget: user.remainingBudget,
-    initialBudget: user.initialBudget,
-    totalSavings: user.totalSavings,
-    avgSavings,
-    totalFixed,
-    fixedExpenses: user.fixedExpenses,
-    streak: user.streak || 0,
-    milestones: user.milestones || [],
-    usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
-    transactions: user.transactions,
-    theme: user.theme || "light"
-  });
+  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light" });
 });
 
 app.post("/api/spend", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   const amount = Number(req.body.amount);
-  if (req.body.isIncome) user.remainingBudget += amount;
-  else user.remainingBudget -= amount;
-  
+  if (req.body.isIncome) user.remainingBudget += amount; else user.remainingBudget -= amount;
   user.transactions.push(req.body);
-
   const today = new Date().toDateString();
-  if (user.lastActive?.toDateString() !== today) {
-    user.streak = (user.streak || 0) + 1;
-    user.lastActive = new Date();
-  }
-  
+  if (user.lastActive?.toDateString() !== today) { user.streak = (user.streak || 0) + 1; user.lastActive = new Date(); }
   if (user.streak === 3 && !user.milestones.includes("3-dagars streak!")) user.milestones.push("3-dagars streak!");
   if (user.totalSavings >= 5000 && !user.milestones.includes("Spar-kung")) user.milestones.push("Spar-kung");
-
-  await user.save();
-  res.json({ success: true });
+  await user.save(); res.json({ success: true });
 });
 
 app.post("/api/send-summary", authenticateToken, async (req, res) => {
@@ -160,70 +107,33 @@ app.post("/api/send-summary", authenticateToken, async (req, res) => {
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo);
     const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0);
-    const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`;
+    const html = \`<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>\${totalSpent} kr</b></p><p>Streak: 🔥 <b>\${user.streak}</b></p>\`;
     await sendEmail(user.email, "Sammanfattning av din vecka!", html);
   }
   res.json({ success: true });
 });
 
-app.post("/api/add-fixed", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  user.fixedExpenses.push(req.body); await user.save(); res.json({ success: true });
-});
-
-app.delete("/api/delete-fixed/:id", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  user.fixedExpenses.pull(req.params.id); await user.save(); res.json({ success: true });
-});
-
-app.post("/api/set-theme", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  user.theme = req.body.theme; await user.save(); res.json({ success: true });
-});
-
-app.post("/api/set-budget", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  user.initialBudget = req.body.budget;
-  user.remainingBudget = req.body.budget;
-  user.transactions = [];
-  await user.save();
-  res.json({ success: true });
-});
-
-app.post("/api/set-payday", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  user.targetPayday = req.body.payday; await user.save(); res.json({ success: true });
-});
-
-app.post("/api/archive-month", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  user.totalSavings += user.remainingBudget;
-  user.monthsArchived += 1;
-  user.remainingBudget = user.initialBudget;
-  user.transactions = [];
-  await user.save();
-  res.json({ success: true });
-});
-
-app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => {
-  const user = await User.findById(req.user.id);
-  const tx = user.transactions.id(req.params.id);
-  if (tx) {
-    if (tx.isIncome) user.remainingBudget -= tx.amount;
-    else user.remainingBudget += tx.amount;
-    tx.deleteOne(); await user.save();
-  }
-  res.json({ success: true });
-});
+app.post("/api/add-fixed", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.fixedExpenses.push(req.body); await user.save(); res.json({ success: true }); });
+app.delete("/api/delete-fixed/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.fixedExpenses.pull(req.params.id); await user.save(); res.json({ success: true }); });
+app.post("/api/set-theme", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.theme = req.body.theme; await user.save(); res.json({ success: true }); });
+app.post("/api/set-budget", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.initialBudget = req.body.budget; user.remainingBudget = req.body.budget; user.transactions = []; await user.save(); res.json({ success: true }); });
+app.post("/api/set-payday", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.targetPayday = req.body.payday; await user.save(); res.json({ success: true }); });
+app.post("/api/archive-month", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.totalSavings += user.remainingBudget; user.monthsArchived += 1; user.remainingBudget = user.initialBudget; user.transactions = []; await user.save(); res.json({ success: true }); });
+app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const tx = user.transactions.id(req.params.id); if (tx) { if (tx.isIncome) user.remainingBudget -= tx.amount; else user.remainingBudget += tx.amount; tx.deleteOne(); await user.save(); } res.json({ success: true }); });
 
 app.get("/", (req, res) => {
-  res.send(`
+  res.send(\`
     <!DOCTYPE html>
     <html lang="sv">
       <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
         <title>Budget kollen</title>
+        <link rel="manifest" href="/manifest.json">
+        <meta name="theme-color" content="#0084ff">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2953/2953363.png">
         <style>
           :root { --bg: #f0f2f5; --card: white; --text: #333; --sub: #666; --border: #eee; --input: #f9f9f9; --primary: #0084ff; --plus: #2ecc71; }
           body.dark-mode { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --sub: #aaa; --border: #333; --input: #2a2a2a; }
@@ -252,17 +162,15 @@ app.get("/", (req, res) => {
       </head>
       <body>
         <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:12px 25px; border-radius:30px; display:none; z-index:1000;">Sparat!</div>
-        
         <div id="loginScreen">
           <div class="card">
             <h2 style="margin-bottom:20px">Budget kollen</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="Din e-post (valfritt)">
+            <input type="email" id="emailIn" placeholder="E-post (valfritt)">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
-
         <div id="mainContent" style="display:none">
           <div id="view-home" class="view active">
             <div class="card">
@@ -278,7 +186,7 @@ app.get("/", (req, res) => {
               <p id="stats" style="font-size: 13px; color: var(--sub); margin-bottom: 20px;"></p>
               <div class="section">
                 <select id="cat">
-                  <option value="Hushåll">🧼 Hushåll</option><option value="Mat">🍔 Mat</option>
+                  <option value="Mat">🍔 Mat</option><option value="Hushåll">🧼 Hushåll</option>
                   <option value="Shopping">🛍️ Shopping</option><option value="Transport">🚗 Transport</option>
                   <option value="Swish/Plus">💸 Swish/Plus</option><option value="Övrigt">Övrigt</option>
                 </select>
@@ -292,7 +200,6 @@ app.get("/", (req, res) => {
               <div id="list" style="margin-top: 20px;"></div>
             </div>
           </div>
-
           <div id="view-fixed" class="view">
             <div class="card">
               <h2>Fasta utgifter</h2>
@@ -302,7 +209,6 @@ app.get("/", (req, res) => {
               <div id="fixedList" style="margin-top: 20px;"></div>
             </div>
           </div>
-
           <div id="view-settings" class="view">
             <div class="card">
               <h2>Inställningar</h2>
@@ -311,16 +217,12 @@ app.get("/", (req, res) => {
                 <button class="affiliate-btn" onclick="window.open('https://www.compricer.se', '_blank')">⚡ Jämför elavtal</button>
                 <button class="affiliate-btn" onclick="window.open('https://buymeacoffee.com/northernsuccess', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
               </div>
-
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
-              
               <input type="number" id="newBudget" placeholder="Ny månadsbudget (kr)">
               <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Uppdatera budget</button>
-              
               <input type="number" id="newPayday" placeholder="Ny lönedag (t.ex. 25)">
               <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
-              
               <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
             </div>
@@ -331,95 +233,28 @@ app.get("/", (req, res) => {
             <button class="tab-btn" id="btn-settings" onclick="showTab('settings')">⚙️ Inställningar</button>
           </div>
         </div>
-
         <script>
-          let token = localStorage.getItem('budget_token');
-          if(token) showApp();
-
-          function api(url, method='GET', body=null) {
-            const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } };
-            if(body) opts.body = JSON.stringify(body);
-            return fetch(url, opts);
-          }
-
-          async function login() {
-            const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value;
-            const res = await fetch('/api/auth', { 
-              method: 'POST', headers: {'Content-Type': 'application/json'}, 
-              body: JSON.stringify({ username: u, password: p, email: e }) 
-            });
-            const data = await res.json();
-            if(res.ok) { 
-              localStorage.setItem('budget_token', data.token); 
-              token = data.token; 
-              showApp(); 
-            } else alert(data.error || "Fel!");
-          }
-
+          if('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker.js');
+          let token = localStorage.getItem('budget_token'); if(token) showApp();
+          function api(url, method='GET', body=null) { const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } }; if(body) opts.body = JSON.stringify(body); return fetch(url, opts); }
+          async function login() { const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value; const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username: u, password: p, email: e }) }); const data = await res.json(); if(res.ok) { localStorage.setItem('budget_token', data.token); token = data.token; showApp(); } else alert(data.error || "Fel!"); }
           function showApp() { document.getElementById('loginScreen').style.display='none'; document.getElementById('mainContent').style.display='block'; update(); }
           function showTab(t) { document.querySelectorAll('.view').forEach(v=>v.classList.remove('active')); document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.getElementById('view-'+t).classList.add('active'); document.getElementById('btn-'+t).classList.add('active'); }
-
-          async function update() {
-            const res = await api('/api/overview');
-            if(!res.ok) return logout();
-            const data = await res.json();
-            
-            document.body.classList.toggle('dark-mode', data.theme === 'dark');
-            document.getElementById('daily').innerText = data.dailyLimit + ':-';
-            document.getElementById('totalSavings').innerText = data.totalSavings;
-            document.getElementById('avgSavings').innerText = data.avgSavings;
-            document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak";
-            document.getElementById('bar').style.width = data.usedPercent + '%';
-            document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate;
-            document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join('');
-            
-            document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
-            document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
-          }
-
-          async function saveTx(isIncome) {
-            const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value;
-            await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome});
-            document.getElementById('amt').value=''; update(); showToast("Sparat!");
-          }
-
-          async function addFixed() {
-            const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value);
-            await api('/api/add-fixed', 'POST', {name, amount});
-            update(); showToast("Fast utgift tillagd!");
-          }
-
-          async function action(type, key) {
-            const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value;
-            if(!val) return;
-            const body = {}; body[key] = Number(val);
-            await api('/api/set-'+type, 'POST', body);
-            document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = '';
-            update(); showToast("Uppdaterat!");
-          }
-
+          async function update() { const res = await api('/api/overview'); if(!res.ok) return logout(); const data = await res.json(); document.body.classList.toggle('dark-mode', data.theme === 'dark'); document.getElementById('daily').innerText = data.dailyLimit + ':-'; document.getElementById('totalSavings').innerText = data.totalSavings; document.getElementById('avgSavings').innerText = data.avgSavings; document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak"; document.getElementById('bar').style.width = data.usedPercent + '%'; document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate; document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join(''); document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); }
+          async function saveTx(isIncome) { const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value; await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome}); document.getElementById('amt').value=''; update(); showToast("Sparat!"); }
+          async function addFixed() { const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value); await api('/api/add-fixed', 'POST', {name, amount}); update(); showToast("Fast utgift tillagd!"); }
+          async function action(type, key) { const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value; if(!val) return; const body = {}; body[key] = Number(val); await api('/api/set-'+type, 'POST', body); document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = ''; update(); showToast("Uppdaterat!"); }
           async function deleteFixed(id) { await api('/api/delete-fixed/'+id, 'DELETE'); update(); }
           async function deleteItem(id) { await api('/api/delete-transaction/'+id, 'DELETE'); update(); }
           async function sendSummary() { await api('/api/send-summary', 'POST'); showToast("Skickat!"); }
-          
-          async function toggleTheme() { 
-            const theme = document.body.classList.contains('dark-mode') ? 'light' : 'dark';
-            await api('/api/set-theme', 'POST', {theme});
-            update();
-          }
-
+          async function toggleTheme() { const theme = document.body.classList.contains('dark-mode') ? 'light' : 'dark'; await api('/api/set-theme', 'POST', {theme}); update(); }
           async function archive() { if(confirm("Spara månaden?")) { await api('/api/archive-month', 'POST'); update(); } }
-          
           function logout() { localStorage.removeItem('budget_token'); location.reload(); }
-          
-          function showToast(msg) {
-            const t = document.getElementById('toast'); t.innerText = msg; t.style.display = 'block';
-            setTimeout(() => t.style.display = 'none', 2500);
-          }
+          function showToast(msg) { const t = document.getElementById('toast'); t.innerText = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2500); }
         </script>
       </body>
     </html>
-  `);
+  \`);
 });
 
 app.listen(PORT, () => console.log("Server redo!"));
