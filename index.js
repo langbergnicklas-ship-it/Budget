@@ -39,7 +39,7 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- PWA INSTÄLLNINGAR (APP IKON) ---
+// --- PWA & APP-IKON ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen",
@@ -221,6 +221,7 @@ app.get("/", (req, res) => {
                 <button class="affiliate-btn" onclick="window.open('https://www.compricer.se', '_blank')">⚡ Jämför elavtal</button>
                 <button class="affiliate-btn" onclick="window.open('https://buymeacoffee.com/northernsuccess', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
               </div>
+
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
               
@@ -244,21 +245,87 @@ app.get("/", (req, res) => {
         <script>
           if('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker.js');
           let token = localStorage.getItem('budget_token'); if(token) showApp();
-          function api(url, method='GET', body=null) { const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } }; if(body) opts.body = JSON.stringify(body); return fetch(url, opts); }
-          async function login() { const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value; const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username: u, password: p, email: e }) }); const data = await res.json(); if(res.ok) { localStorage.setItem('budget_token', data.token); token = data.token; showApp(); } else alert(data.error || "Fel!"); }
+
+          function api(url, method='GET', body=null) {
+            const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } };
+            if(body) opts.body = JSON.stringify(body);
+            return fetch(url, opts);
+          }
+
+          async function login() {
+            const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value;
+            const res = await fetch('/api/auth', { 
+              method: 'POST', headers: {'Content-Type': 'application/json'}, 
+              body: JSON.stringify({ username: u, password: p, email: e }) 
+            });
+            const data = await res.json();
+            if(res.ok) { 
+              localStorage.setItem('budget_token', data.token); 
+              token = data.token; 
+              showApp(); 
+            } else alert(data.error || "Fel!");
+          }
+
           function showApp() { document.getElementById('loginScreen').style.display='none'; document.getElementById('mainContent').style.display='block'; update(); }
           function showTab(t) { document.querySelectorAll('.view').forEach(v=>v.classList.remove('active')); document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.getElementById('view-'+t).classList.add('active'); document.getElementById('btn-'+t).classList.add('active'); }
-          async function update() { const res = await api('/api/overview'); if(!res.ok) return logout(); const data = await res.json(); document.body.classList.toggle('dark-mode', data.theme === 'dark'); document.getElementById('daily').innerText = data.dailyLimit + ':-'; document.getElementById('totalSavings').innerText = data.totalSavings; document.getElementById('avgSavings').innerText = data.avgSavings; document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak"; document.getElementById('bar').style.width = data.usedPercent + '%'; document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate; document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join(''); document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); }
-          async function saveTx(isIncome) { const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value; await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome}); document.getElementById('amt').value=''; update(); showToast("Sparat!"); }
-          async function addFixed() { const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value); await api('/api/add-fixed', 'POST', {name, amount}); update(); showToast("Fast utgift tillagd!"); }
-          async function action(type, key) { const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value; if(!val) return; const body = {}; body[key] = Number(val); await api('/api/set-'+type, 'POST', body); document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = ''; update(); showToast("Uppdaterat!"); }
+
+          async function update() {
+            const res = await api('/api/overview');
+            if(!res.ok) return logout();
+            const data = await res.json();
+            
+            document.body.classList.toggle('dark-mode', data.theme === 'dark');
+            document.getElementById('daily').innerText = data.dailyLimit + ':-';
+            document.getElementById('totalSavings').innerText = data.totalSavings;
+            document.getElementById('avgSavings').innerText = data.avgSavings;
+            document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak";
+            document.getElementById('bar').style.width = data.usedPercent + '%';
+            document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate;
+            document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join('');
+            
+            document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
+            document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join('');
+          }
+
+          async function saveTx(isIncome) {
+            const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value;
+            await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome});
+            document.getElementById('amt').value=''; update(); showToast("Sparat!");
+          }
+
+          async function addFixed() {
+            const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value);
+            await api('/api/add-fixed', 'POST', {name, amount});
+            update(); showToast("Fast utgift tillagd!");
+          }
+
+          async function action(type, key) {
+            const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value;
+            if(!val) return;
+            const body = {}; body[key] = Number(val);
+            await api('/api/set-'+type, 'POST', body);
+            document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = '';
+            update(); showToast("Uppdaterat!");
+          }
+
           async function deleteFixed(id) { await api('/api/delete-fixed/'+id, 'DELETE'); update(); }
           async function deleteItem(id) { await api('/api/delete-transaction/'+id, 'DELETE'); update(); }
           async function sendSummary() { await api('/api/send-summary', 'POST'); showToast("Skickat!"); }
-          async function toggleTheme() { const theme = document.body.classList.contains('dark-mode') ? 'light' : 'dark'; await api('/api/set-theme', 'POST', {theme}); update(); }
+          
+          async function toggleTheme() { 
+            const theme = document.body.classList.contains('dark-mode') ? 'light' : 'dark';
+            await api('/api/set-theme', 'POST', {theme});
+            update();
+          }
+
           async function archive() { if(confirm("Spara månaden?")) { await api('/api/archive-month', 'POST'); update(); } }
+          
           function logout() { localStorage.removeItem('budget_token'); location.reload(); }
-          function showToast(msg) { const t = document.getElementById('toast'); t.innerText = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2500); }
+          
+          function showToast(msg) {
+            const t = document.getElementById('toast'); t.innerText = msg; t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 2500);
+          }
         </script>
       </body>
     </html>
