@@ -1,7 +1,6 @@
 {
   "name": "budget-app",
   "version": "1.0.0",
-  "description": "Budget app",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
