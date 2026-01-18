@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken"); // NYTT: För säker inloggning
+const jwt = require("jsonwebtoken");
 const app = express();
 
 app.use(cors());
@@ -10,13 +10,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
-const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen"; // Byt gärna denna i Render environment variables
+const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// --- MEJL-FUNKTION ---
+// --- MEJL-MOTOR (Brevo API) ---
 async function sendEmail(toEmail, subject, html) {
   try {
     if (!process.env.BREVO_API_KEY) return;
@@ -39,7 +39,7 @@ async function sendEmail(toEmail, subject, html) {
   }
 }
 
-// --- SCHEMA ---
+// --- DATA SCHEMA ---
 const transactionSchema = new mongoose.Schema({
   description: String,
   amount: Number,
@@ -67,120 +67,92 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", userSchema);
 
-// --- MIDDLEWARE (Säkerhetsvakt) ---
-// Denna funktion kollar att användaren har en giltig Token innan de får göra något
+// --- MIDDLEWARE ---
 const authenticateToken = (req, res, next) => {
   const token = req.headers['authorization'];
-  if (!token) return res.status(401).json({ error: "Ingen token, logga in." });
-
+  if (!token) return res.status(401).json({ error: "Ingen token" });
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Ogiltig token." });
-    req.user = user; // Spara användar-ID i requesten
+    if (err) return res.status(403).json({ error: "Ogiltig token" });
+    req.user = user;
     next();
   });
 };
 
 // --- API ROUTES ---
 
-// 1. LOGIN / REGISTRERING (Enda stället vi skickar lösenord)
 app.post("/api/auth", async (req, res) => {
   try {
     const { username, password, email } = req.body;
-    if(!username || !password) return res.status(400).json({ error: "Fyll i allt" });
-
     let user = await User.findOne({ username });
     
-    // Om användaren inte finns -> SKAPA NY
     if (!user) {
       const hashedPassword = await bcrypt.hash(password, 10);
       user = await User.create({ username, password: hashedPassword, email });
       if (email && process.env.BREVO_API_KEY) {
-        sendEmail(email, "Välkommen till Budget kollen!", `<h2>Hej ${username}!</h2><p>Konto skapat.</p>`);
+        sendEmail(email, "Välkommen till Budget kollen! 💰", `<h2>Hej ${username}!</h2><p>Ditt konto är redo.</p>`);
       }
     } else {
-      // Om användaren finns -> KOLLA LÖSENORD
       const isMatch = await bcrypt.compare(password, user.password);
       if (!isMatch) return res.status(401).json({ error: "Fel lösenord" });
     }
 
-    // SKAPA TOKEN (Säkerhetsnyckel)
     const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, username: user.username });
-
   } catch (err) {
     res.status(500).json({ error: "Serverfel" });
   }
 });
 
-// 2. HÄMTA ÖVERSIKT (Skyddad med Token)
 app.get("/api/overview", authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ error: "Användare saknas" });
+  const user = await User.findById(req.user.id);
+  const now = new Date();
+  let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
+  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
+  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+  if (now >= payday.setHours(23, 59, 59)) payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
 
-    const now = new Date();
-    let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
-    if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2);
-    else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
-    if (now >= payday.setHours(23, 59, 59)) payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
+  const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
+  const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
+  const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
 
-    const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
-    const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
-
-    // FIX: Säkrare uträkning av snittsparande
-    const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
-
-    res.json({
-      dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft),
-      daysLeft,
-      paydayDate: payday.toLocaleDateString('sv-SE'),
-      remainingBudget: user.remainingBudget,
-      initialBudget: user.initialBudget,
-      totalSavings: user.totalSavings,
-      avgSavings, // Den fixade variabeln
-      totalFixed,
-      fixedExpenses: user.fixedExpenses,
-      streak: user.streak || 0,
-      milestones: user.milestones || [],
-      usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
-      transactions: user.transactions,
-      theme: user.theme || "light"
-    });
-  } catch (err) {
-    res.status(500).json({ error: "Kunde inte hämta data" });
-  }
+  res.json({
+    dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft),
+    daysLeft,
+    paydayDate: payday.toLocaleDateString('sv-SE'),
+    remainingBudget: user.remainingBudget,
+    initialBudget: user.initialBudget,
+    totalSavings: user.totalSavings,
+    avgSavings,
+    totalFixed,
+    fixedExpenses: user.fixedExpenses,
+    streak: user.streak || 0,
+    milestones: user.milestones || [],
+    usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)),
+    transactions: user.transactions,
+    theme: user.theme || "light"
+  });
 });
 
-// 3. SPARA KÖP / INKOMST (Skyddad)
 app.post("/api/spend", authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    const amount = Number(req.body.amount);
-    if (!amount) return res.status(400).json({ error: "Belopp saknas" });
+  const user = await User.findById(req.user.id);
+  const amount = Number(req.body.amount);
+  if (req.body.isIncome) user.remainingBudget += amount;
+  else user.remainingBudget -= amount;
+  
+  user.transactions.push(req.body);
 
-    if (req.body.isIncome) user.remainingBudget += amount;
-    else user.remainingBudget -= amount;
-    
-    user.transactions.push(req.body);
-
-    // Streak logic
-    const today = new Date().toDateString();
-    if (user.lastActive?.toDateString() !== today) {
-      user.streak = (user.streak || 0) + 1;
-      user.lastActive = new Date();
-    }
-    
-    if (user.streak === 3 && !user.milestones.includes("3-dagars streak!")) user.milestones.push("3-dagars streak!");
-    if (user.totalSavings >= 5000 && !user.milestones.includes("Spar-kung")) user.milestones.push("Spar-kung");
-
-    await user.save();
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: "Kunde inte spara" });
+  const today = new Date().toDateString();
+  if (user.lastActive?.toDateString() !== today) {
+    user.streak = (user.streak || 0) + 1;
+    user.lastActive = new Date();
   }
-});
+  
+  if (user.streak === 3 && !user.milestones.includes("3-dagars streak!")) user.milestones.push("3-dagars streak!");
+  if (user.totalSavings >= 5000 && !user.milestones.includes("Spar-kung")) user.milestones.push("Spar-kung");
 
-// --- ÖVRIGA SKYDDADE ROUTES ---
+  await user.save();
+  res.json({ success: true });
+});
 
 app.post("/api/send-summary", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
@@ -244,7 +216,6 @@ app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) =>
   res.json({ success: true });
 });
 
-// --- FRONTEND ---
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -338,7 +309,7 @@ app.get("/", (req, res) => {
               <div style="background:var(--input); padding:15px; border-radius:15px; margin-bottom:20px;">
                 <p style="font-weight:bold; font-size:12px; margin-top:0;">SPARA PENGAR & STÖTTA</p>
                 <button class="affiliate-btn" onclick="window.open('https://www.compricer.se', '_blank')">⚡ Jämför elavtal</button>
-                <button class="affiliate-btn" onclick="window.open('https://www.buymeacoffee.com', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
+                <button class="affiliate-btn" onclick="window.open('https://buymeacoffee.com/northernsuccess', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
               </div>
 
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
@@ -354,7 +325,6 @@ app.get("/", (req, res) => {
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
             </div>
           </div>
-
           <div class="tab-bar">
             <button class="tab-btn active" id="btn-home" onclick="showTab('home')">🏠 Hem</button>
             <button class="tab-btn" id="btn-fixed" onclick="showTab('fixed')">📜 Fasta</button>
@@ -424,6 +394,7 @@ app.get("/", (req, res) => {
             if(!val) return;
             const body = {}; body[key] = Number(val);
             await api('/api/set-'+type, 'POST', body);
+            document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = '';
             update(); showToast("Uppdaterat!");
           }
 
