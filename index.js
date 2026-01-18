@@ -39,7 +39,7 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- PWA & APP-IKON ---
+// --- PWA INSTÄLLNINGAR ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen",
@@ -333,3 +333,4 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server redo!"));
+// KLART
