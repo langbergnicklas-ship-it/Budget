@@ -39,7 +39,7 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- APP KONFIGURATION (MANIFEST & IKONER) ---
+// --- PWA INSTÄLLNINGAR (APP IKON) ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen",
@@ -162,15 +162,17 @@ app.get("/", (req, res) => {
       </head>
       <body>
         <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:12px 25px; border-radius:30px; display:none; z-index:1000;">Sparat!</div>
+        
         <div id="loginScreen">
           <div class="card">
             <h2 style="margin-bottom:20px">Budget kollen</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="E-post (valfritt)">
+            <input type="email" id="emailIn" placeholder="Din e-post (valfritt)">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
+
         <div id="mainContent" style="display:none">
           <div id="view-home" class="view active">
             <div class="card">
@@ -200,6 +202,7 @@ app.get("/", (req, res) => {
               <div id="list" style="margin-top: 20px;"></div>
             </div>
           </div>
+
           <div id="view-fixed" class="view">
             <div class="card">
               <h2>Fasta utgifter</h2>
@@ -209,6 +212,7 @@ app.get("/", (req, res) => {
               <div id="fixedList" style="margin-top: 20px;"></div>
             </div>
           </div>
+
           <div id="view-settings" class="view">
             <div class="card">
               <h2>Inställningar</h2>
@@ -219,10 +223,13 @@ app.get("/", (req, res) => {
               </div>
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
+              
               <input type="number" id="newBudget" placeholder="Ny månadsbudget (kr)">
               <button onclick="action('set-budget', 'budget')" style="background:#27ae60; margin-bottom:15px">Uppdatera budget</button>
+              
               <input type="number" id="newPayday" placeholder="Ny lönedag (t.ex. 25)">
               <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
+              
               <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
             </div>
@@ -233,6 +240,7 @@ app.get("/", (req, res) => {
             <button class="tab-btn" id="btn-settings" onclick="showTab('settings')">⚙️ Inställningar</button>
           </div>
         </div>
+
         <script>
           if('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker.js');
           let token = localStorage.getItem('budget_token'); if(token) showApp();
