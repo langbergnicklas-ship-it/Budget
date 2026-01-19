@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
-// HÄMTA NYCKLAR FRÅN RENDER (Säkert!)
+// --- HÄMTA NYCKLAR FRÅN RENDER (SÄKERT) ---
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
 
@@ -70,13 +70,11 @@ cron.schedule("0 9 * * *", async () => {
     let title = "";
     let body = "";
 
-    // 1. LÖNEDAG
     if (today.getDate() === user.targetPayday) {
       title = "Lönedag! 💸";
       body = "Pengarna har rullat in. Dags att budgetera!";
     }
 
-    // 2. INAKTIVITET (3 dagar)
     if (user.lastActive) {
       const diffTime = Math.abs(today - user.lastActive);
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
@@ -86,7 +84,7 @@ cron.schedule("0 9 * * *", async () => {
       }
     }
 
-    if (title) {
+    if (title && publicVapidKey && privateVapidKey) {
       try {
         await webPush.sendNotification(user.pushSubscription, JSON.stringify({ title, body }));
       } catch (err) { console.error("Kunde inte skicka notis", err); }
@@ -324,7 +322,7 @@ app.get("/", (req, res) => {
             const res = await api('/api/overview'); 
             if(!res.ok) return logout(); 
             const data = await res.json(); 
-            publicVapidKey = data.publicVapidKey; // Hämta nyckeln dynamiskt
+            publicVapidKey = data.publicVapidKey;
             
             document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
             document.getElementById('daily').innerText = data.dailyLimit + ':-'; 
@@ -348,7 +346,7 @@ app.get("/", (req, res) => {
           async function archive() { if(confirm("Spara månaden?")) { await api('/api/archive-month', 'POST'); update(); } }
           
           async function enableNotifs() {
-            if(!publicVapidKey) return alert("Laddar nycklar... Försök igen om 2 sekunder.");
+            if(!publicVapidKey) return alert("Hämtar nycklar... Försök om 2 sekunder.");
             const reg = await navigator.serviceWorker.ready;
             const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicVapidKey });
             await api('/api/subscribe', 'POST', sub);
