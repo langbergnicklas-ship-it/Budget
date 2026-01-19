@@ -238,9 +238,7 @@ app.get("/", (req, res) => {
                 <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
               </div>
               <p style="font-size:11px; font-weight:bold; color:var(--sub)">REKOMMENDERAD DAGSBUDGET</p>
-              
               <h1 id="daily">...</h1>
-              
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: var(--sub); margin-bottom: 20px;"></p>
               <div class="section">
@@ -321,8 +319,8 @@ app.get("/", (req, res) => {
 
             document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
             
-            // HÄR ÄR ÄNDRINGEN (MARGIN-TOP 15px istället för 5px)
-            document.getElementById('daily').innerHTML = data.dailyLimit + ':- <span style="font-size:16px; color:var(--sub); font-weight:normal; vertical-align:middle; display:block; margin-top:15px;">(' + data.daysLeft + ' dagar till lön)</span>';
+            // HÄR ÄR ÄNDRINGEN (Särar på texten ordentligt)
+            document.getElementById('daily').innerHTML = data.dailyLimit + ':- <div style="font-size:14px; color:var(--sub); font-weight:normal; margin-top:25px; padding-top:10px;">⏳ ' + data.daysLeft + ' dagar till lön</div>';
             
             document.getElementById('totalSavings').innerText = data.totalSavings; 
             document.getElementById('avgSavings').innerText = data.avgSavings; 
