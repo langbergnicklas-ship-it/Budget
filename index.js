@@ -305,7 +305,7 @@ app.get("/", (req, res) => {
               <h2>Inställningar</h2>
               <div style="background:var(--input); padding:15px; border-radius:15px; margin-bottom:20px;">
                 <p style="font-weight:bold; font-size:12px; margin-top:0;">SPARA PENGAR & STÖTTA</p>
-                <button class="affiliate-btn" onclick="window.open('https://www.compricer.se', '_blank')">⚡ Jämför elavtal</button>
+                <button class="affiliate-btn" onclick="window.open('https://www.fello.se/?AKHMQ', '_blank')">⚡ Fello </button>
                 <button class="affiliate-btn" onclick="window.open('https://buymeacoffee.com/northernsuccess', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
               </div>
               
