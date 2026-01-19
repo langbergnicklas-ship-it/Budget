@@ -14,7 +14,6 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
-// --- HÄMTA NYCKLAR FRÅN RENDER ---
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
 
@@ -28,7 +27,6 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// --- MEJL-MOTOR ---
 async function sendEmail(toEmail, subject, html) {
   try {
     if (!process.env.BREVO_API_KEY) return;
@@ -39,7 +37,6 @@ async function sendEmail(toEmail, subject, html) {
   } catch (error) { console.error("Mejlfel:", error); }
 }
 
-// --- SCHEMA ---
 const transactionSchema = new mongoose.Schema({ description: String, amount: Number, category: { type: String, default: "Övrigt" }, isIncome: { type: Boolean, default: false }, timestamp: { type: Date, default: Date.now } });
 const userSchema = new mongoose.Schema({ 
   username: { type: String, required: true, unique: true }, 
@@ -60,7 +57,6 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// --- NOTISER (CRON) ---
 cron.schedule("0 9 * * *", async () => {
   if (!publicVapidKey || !privateVapidKey) return;
   const users = await User.find({});
@@ -70,10 +66,14 @@ cron.schedule("0 9 * * *", async () => {
     if (!user.pushSubscription) return; 
     let title = ""; let body = "";
     if (today.getDate() === user.targetPayday) { title = "Lönedag! 💸"; body = "Pengarna har rullat in. Dags att budgetera!"; }
+    
     if (user.lastActive) {
       const diffTime = Math.abs(today - user.lastActive);
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
-      if (diffDays === 3) { title = "Tappa inte din streak! 🔥"; body = "3 dagar sedan du loggade något."; }
+      if (diffDays >= 2) { 
+        title = "Rädda din streak! 🔥"; 
+        body = "Gå in i appen idag för att inte tappa din streak."; 
+      }
     }
     if (title) {
       try { await webPush.sendNotification(user.pushSubscription, JSON.stringify({ title, body })); } 
@@ -82,14 +82,12 @@ cron.schedule("0 9 * * *", async () => {
   });
 });
 
-// --- MIDDLEWARE ---
 const authenticateToken = (req, res, next) => {
   const token = req.headers['authorization'];
   if (!token) return res.status(401).json({ error: "Ingen token" });
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- PWA ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen", "short_name": "Budget", "start_url": "/", "display": "standalone", "background_color": "#ffffff", "theme_color": "#0084ff",
@@ -98,27 +96,17 @@ app.get('/manifest.json', (req, res) => {
 });
 app.get('/service-worker.js', (req, res) => {
   res.set('Content-Type', 'application/javascript');
-  res.send(`
-    self.addEventListener('install', (e) => { self.skipWaiting(); });
-    self.addEventListener('push', (e) => {
-      const data = e.data.json();
-      self.registration.showNotification(data.title, { body: data.body, icon: 'https://cdn-icons-png.flaticon.com/512/2953/2953363.png' });
-    });
-  `);
+  res.send(`self.addEventListener('install', (e) => { self.skipWaiting(); }); self.addEventListener('push', (e) => { const data = e.data.json(); self.registration.showNotification(data.title, { body: data.body, icon: 'https://cdn-icons-png.flaticon.com/512/2953/2953363.png' }); });`);
 });
 
-// --- API ROUTES ---
 app.post("/api/auth", async (req, res) => {
   try {
     const { username, password, email } = req.body;
     let user = await User.findOne({ username });
     if (!user) {
       const hashedPassword = await bcrypt.hash(password, 10);
-      user = await User.create({ username, password: hashedPassword, email, lastActive: new Date() });
-      if (email && process.env.BREVO_API_KEY) {
-         // HÄR VAR FELET! Nu är det fixat:
-         sendEmail(email, "Välkommen!", `<h2>Hej ${username}!</h2><p>Konto redo.</p>`);
-      }
+      user = await User.create({ username, password: hashedPassword, email, lastActive: new Date(), streak: 1 });
+      if (email && process.env.BREVO_API_KEY) sendEmail(email, "Välkommen!", `<h2>Hej ${username}!</h2>`);
     } else { if (!(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Fel lösenord" }); }
     const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, username: user.username });
@@ -133,13 +121,32 @@ app.post("/api/subscribe", authenticateToken, async (req, res) => {
 app.get("/api/overview", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   const now = new Date();
+  
+  const todayStr = now.toDateString();
+  const lastActiveStr = user.lastActive ? user.lastActive.toDateString() : null;
+
+  if (lastActiveStr !== todayStr) {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (user.lastActive && user.lastActive.toDateString() === yesterday.toDateString()) {
+      user.streak = (user.streak || 0) + 1;
+    } else {
+      user.streak = 1;
+    }
+    user.lastActive = now;
+    if (user.streak === 3 && !user.milestones.includes("3-dagars streak!")) user.milestones.push("3-dagars streak!");
+    if (user.streak === 7 && !user.milestones.includes("1 vecka!")) user.milestones.push("1 vecka!");
+    await user.save();
+  }
+
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday);
   if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2); else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   if (now >= payday.setHours(23, 59, 59)) payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday);
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
-  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY || "" });
+  
+  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 1, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY || "" });
 });
 
 app.post("/api/spend", authenticateToken, async (req, res) => {
@@ -147,9 +154,6 @@ app.post("/api/spend", authenticateToken, async (req, res) => {
   const amount = Number(req.body.amount);
   if (req.body.isIncome) user.remainingBudget += amount; else user.remainingBudget -= amount;
   user.transactions.push(req.body);
-  const today = new Date().toDateString();
-  if (user.lastActive?.toDateString() !== today) { user.streak = (user.streak || 0) + 1; user.lastActive = new Date(); }
-  if (user.streak === 3 && !user.milestones.includes("3-dagars streak!")) user.milestones.push("3-dagars streak!");
   if (user.totalSavings >= 5000 && !user.milestones.includes("Spar-kung")) user.milestones.push("Spar-kung");
   await user.save(); res.json({ success: true });
 });
@@ -160,7 +164,6 @@ app.post("/api/send-summary", authenticateToken, async (req, res) => {
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo);
     const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0);
-    // HÄR VAR OCKSÅ ETT TECKENFEL FIXAT:
     const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`;
     await sendEmail(user.email, "Sammanfattning av din vecka!", html);
   }
@@ -176,7 +179,6 @@ app.post("/api/archive-month", authenticateToken, async (req, res) => { const us
 app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const tx = user.transactions.id(req.params.id); if (tx) { if (tx.isIncome) user.remainingBudget -= tx.amount; else user.remainingBudget += tx.amount; tx.deleteOne(); await user.save(); } res.json({ success: true }); });
 
 app.get("/", (req, res) => {
-  // OBS: I strängen nedan använder jag ` tecken (backticks) som är korrekt.
   res.send(`
     <!DOCTYPE html>
     <html lang="sv">
@@ -243,13 +245,13 @@ app.get("/", (req, res) => {
                 <select id="cat">
                   <option value="Mat">🍔 Mat</option><option value="Hushåll">🧼 Hushåll</option>
                   <option value="Shopping">🛍️ Shopping</option><option value="Transport">🚗 Transport</option>
-                  <option value="Swish/Plus">💸 Swish/Plus</option><option value="Övrigt">Övrigt</option>
+                  <option value="Inkomst">💸 Inkomst</option><option value="Övrigt">Övrigt</option>
                 </select>
                 <input type="text" id="desc" placeholder="Vad?">
                 <input type="number" id="amt" inputmode="decimal" placeholder="Belopp (kr)">
                 <div class="btn-group">
                   <button onclick="saveTx(false)">Spara köp</button>
-                  <button class="plus-btn" onclick="saveTx(true)">+ Swish</button>
+                  <button class="plus-btn" onclick="saveTx(true)">+ Inkomst</button>
                 </div>
               </div>
               <div id="list" style="margin-top: 20px;"></div>
@@ -313,11 +315,11 @@ app.get("/", (req, res) => {
             const data = await res.json(); 
             publicVapidKey = data.publicVapidKey;
             
-            // Dölj knappen om nycklar saknas i Render
             if(!publicVapidKey) document.getElementById('pushSection').style.display = 'none';
 
             document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
-            document.getElementById('daily').innerText = data.dailyLimit + ':-'; 
+            document.getElementById('daily').innerHTML = data.dailyLimit + ':- <span style="font-size:16px; color:var(--sub); font-weight:normal; vertical-align:middle; display:block; margin-top:5px;">(' + data.daysLeft + ' dagar till lön)</span>';
+            
             document.getElementById('totalSavings').innerText = data.totalSavings; 
             document.getElementById('avgSavings').innerText = data.avgSavings; 
             document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak"; 
