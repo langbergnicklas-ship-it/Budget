@@ -14,19 +14,14 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
-// SÄKERHETSKONTROLL: Kollar om nycklar finns innan vi startar push
+// --- HÄMTA NYCKLAR FRÅN RENDER ---
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
 
 if (publicVapidKey && privateVapidKey) {
   try {
     webPush.setVapidDetails('mailto:test@example.com', publicVapidKey, privateVapidKey);
-    console.log("✅ Push-notiser aktiverade");
-  } catch (err) {
-    console.log("⚠️ Varning: Kunde inte starta push-motor", err);
-  }
-} else {
-  console.log("ℹ️ Inga VAPID-nycklar hittades. Push-notiser inaktiverade för stunden.");
+  } catch (err) { console.error("Push error:", err); }
 }
 
 mongoose.connect(MONGODB_URI)
@@ -67,15 +62,14 @@ const User = mongoose.model("User", userSchema);
 
 // --- NOTISER (CRON) ---
 cron.schedule("0 9 * * *", async () => {
-  if (!publicVapidKey || !privateVapidKey) return; // Kör ej om nycklar saknas
-  console.log("⏰ Kör daglig kontroll...");
+  if (!publicVapidKey || !privateVapidKey) return;
   const users = await User.find({});
   const today = new Date();
   
   users.forEach(async (user) => {
     if (!user.pushSubscription) return; 
     let title = ""; let body = "";
-    if (today.getDate() === user.targetPayday) { title = "Lönedag! 💸"; body = "Pengarna har rullat in. Budgetera smart!"; }
+    if (today.getDate() === user.targetPayday) { title = "Lönedag! 💸"; body = "Pengarna har rullat in. Dags att budgetera!"; }
     if (user.lastActive) {
       const diffTime = Math.abs(today - user.lastActive);
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
@@ -95,7 +89,7 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- PWA & SERVICE WORKER ---
+// --- PWA ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen", "short_name": "Budget", "start_url": "/", "display": "standalone", "background_color": "#ffffff", "theme_color": "#0084ff",
@@ -121,7 +115,10 @@ app.post("/api/auth", async (req, res) => {
     if (!user) {
       const hashedPassword = await bcrypt.hash(password, 10);
       user = await User.create({ username, password: hashedPassword, email, lastActive: new Date() });
-      if (email && process.env.BREVO_API_KEY) sendEmail(email, "Välkommen!", \`<h2>Hej \${username}!</h2><p>Konto redo.</p>\`);
+      if (email && process.env.BREVO_API_KEY) {
+         // HÄR VAR FELET! Nu är det fixat:
+         sendEmail(email, "Välkommen!", `<h2>Hej ${username}!</h2><p>Konto redo.</p>`);
+      }
     } else { if (!(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Fel lösenord" }); }
     const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, username: user.username });
@@ -142,7 +139,6 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
-  // Skicka nyckeln BARA om den finns i Render
   res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY || "" });
 });
 
@@ -164,7 +160,8 @@ app.post("/api/send-summary", authenticateToken, async (req, res) => {
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo);
     const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0);
-    const html = \`<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>\${totalSpent} kr</b></p><p>Streak: 🔥 <b>\${user.streak}</b></p>\`;
+    // HÄR VAR OCKSÅ ETT TECKENFEL FIXAT:
+    const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`;
     await sendEmail(user.email, "Sammanfattning av din vecka!", html);
   }
   res.json({ success: true });
@@ -179,7 +176,8 @@ app.post("/api/archive-month", authenticateToken, async (req, res) => { const us
 app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const tx = user.transactions.id(req.params.id); if (tx) { if (tx.isIncome) user.remainingBudget -= tx.amount; else user.remainingBudget += tx.amount; tx.deleteOne(); await user.save(); } res.json({ success: true }); });
 
 app.get("/", (req, res) => {
-  res.send(\`
+  // OBS: I strängen nedan använder jag ` tecken (backticks) som är korrekt.
+  res.send(`
     <!DOCTYPE html>
     <html lang="sv">
       <head>
@@ -351,7 +349,7 @@ app.get("/", (req, res) => {
         </script>
       </body>
     </html>
-  \`);
+  `);
 });
 
 app.listen(PORT, () => console.log("Server redo!"));
