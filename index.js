@@ -14,6 +14,9 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
+// Admin-användarnamn (Hårdkodat för säkerhet)
+const ADMIN_USER = "Nicklas6"; 
+
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
 
@@ -88,6 +91,19 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
+// --- API ROUTES ---
+
+// ADMIN STATS ENDPOINT
+app.get("/api/admin/stats", authenticateToken, async (req, res) => {
+  if (req.user.username !== ADMIN_USER) return res.status(403).json({ error: "Access denied" });
+  
+  const totalUsers = await User.countDocuments();
+  const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+  const activeToday = await User.countDocuments({ lastActive: { $gte: startOfDay } });
+  
+  res.json({ totalUsers, activeToday });
+});
+
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen", "short_name": "Budget", "start_url": "/", "display": "standalone", "background_color": "#ffffff", "theme_color": "#0084ff",
@@ -121,18 +137,13 @@ app.post("/api/subscribe", authenticateToken, async (req, res) => {
 app.get("/api/overview", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   const now = new Date();
-  
   const todayStr = now.toDateString();
   const lastActiveStr = user.lastActive ? user.lastActive.toDateString() : null;
 
   if (lastActiveStr !== todayStr) {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    if (user.lastActive && user.lastActive.toDateString() === yesterday.toDateString()) {
-      user.streak = (user.streak || 0) + 1;
-    } else {
-      user.streak = 1;
-    }
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    if (user.lastActive && user.lastActive.toDateString() === yesterday.toDateString()) user.streak = (user.streak || 0) + 1;
+    else user.streak = 1;
     user.lastActive = now;
     if (user.streak === 3 && !user.milestones.includes("3-dagars streak!")) user.milestones.push("3-dagars streak!");
     if (user.streak === 7 && !user.milestones.includes("1 vecka!")) user.milestones.push("1 vecka!");
@@ -146,7 +157,7 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
   
-  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 1, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY || "" });
+  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 1, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY || "", username: user.username });
 });
 
 app.post("/api/spend", authenticateToken, async (req, res) => {
@@ -216,19 +227,12 @@ app.get("/", (req, res) => {
           .view { display: none; } .view.active { display: block; }
           #loginScreen { padding-top: 50px; }
           
-          /* NY STIL FÖR NEDRÄKNINGS-RUTAN */
-          .countdown-badge {
-            background: #f0f2f5; 
-            color: var(--sub); 
-            padding: 8px 15px; 
-            border-radius: 15px; 
-            font-size: 13px; 
-            font-weight: bold; 
-            display: inline-block; 
-            margin-top: 15px; 
-            margin-bottom: 5px;
-          }
+          .countdown-badge { background: #f0f2f5; color: var(--sub); padding: 8px 15px; border-radius: 15px; font-size: 13px; font-weight: bold; display: inline-block; margin-top: 15px; margin-bottom: 5px; }
           body.dark-mode .countdown-badge { background: #333; color: #ccc; }
+          
+          .gdpr-text { font-size: 10px; color: #aaa; margin-top: 30px; line-height: 1.4; }
+          #adminPanel { display: none; margin-top: 20px; border-top: 1px solid var(--border); padding-top: 20px; }
+          .admin-stats { background: #333; color: gold; padding: 15px; border-radius: 15px; margin-bottom: 10px; border: 1px solid gold; font-family: monospace; }
         </style>
       </head>
       <body>
@@ -296,6 +300,7 @@ app.get("/", (req, res) => {
                 <button onclick="enableNotifs()" style="background:#27ae60; margin-bottom:10px;">🔔 Aktivera Push-notiser</button>
               </div>
 
+              <button onclick="window.location.href='mailto:?subject=Feedback Budgetkollen'" style="background:#3498db; margin-bottom: 10px;">🐛 Rapportera bugg / Önska</button>
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
               <input type="number" id="newBudget" placeholder="Ny månadsbudget (kr)">
@@ -303,7 +308,18 @@ app.get("/", (req, res) => {
               <input type="number" id="newPayday" placeholder="Ny lönedag (t.ex. 25)">
               <button onclick="action('set-payday', 'payday')" style="background:#8e44ad; margin-bottom:25px">Sätt lönedag</button>
               <button onclick="archive()" style="background:#f39c12; margin-bottom:10px">Avsluta månad & spara</button>
+              
+              <div id="adminPanel">
+                <button onclick="fetchAdminStats()" style="background:#000; color:gold; border:1px solid gold;">👑 Visa Statistik</button>
+                <div id="adminData" style="margin-top:10px;"></div>
+              </div>
+
               <button onclick="logout()" style="background:#888; margin-top:20px">Logga ut</button>
+              
+              <div class="gdpr-text">
+                🔒 <b>Datan stannar här.</b><br>
+                Budget kollen delar aldrig din data med tredje part. Din e-post används enbart för inloggning och notiser du själv valt.
+              </div>
             </div>
           </div>
           <div class="tab-bar">
@@ -317,17 +333,13 @@ app.get("/", (req, res) => {
           let token = localStorage.getItem('budget_token'); 
           let publicVapidKey = ""; 
 
-          // HÄR FIXAR VI UTLOGGNINGSPROBLEMET!
-          // Vi visar appen direkt om token finns, så man slipper se login-rutan
           if (token) {
              document.getElementById('loginScreen').style.display='none'; 
              document.getElementById('mainContent').style.display='block';
              initApp();
           }
 
-          async function initApp() {
-            await update();
-          }
+          async function initApp() { await update(); }
 
           function api(url, method='GET', body=null) { const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } }; if(body) opts.body = JSON.stringify(body); return fetch(url, opts); }
           async function login() { const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value; const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username: u, password: p, email: e }) }); const data = await res.json(); if(res.ok) { localStorage.setItem('budget_token', data.token); token = data.token; showApp(); } else alert(data.error || "Fel!"); }
@@ -336,17 +348,17 @@ app.get("/", (req, res) => {
           
           async function update() { 
             const res = await api('/api/overview'); 
-            
-            // BARA LOGGA UT OM KONTOT ÄR OGILTIGT (401/403). Inte om servern krånglar.
-            if(!res.ok) {
-                if(res.status === 401 || res.status === 403) return logout();
-                return; // Gör ingenting om det bara är nätfel
-            }
+            if(!res.ok) { if(res.status === 401 || res.status === 403) return logout(); return; }
 
             const data = await res.json(); 
             publicVapidKey = data.publicVapidKey;
             
             if(!publicVapidKey) document.getElementById('pushSection').style.display = 'none';
+            
+            // VISA ADMIN-PANEL OM DET ÄR NICKLAS6
+            if(data.username === "Nicklas6") {
+                document.getElementById('adminPanel').style.display = 'block';
+            }
 
             document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
             
@@ -362,6 +374,18 @@ app.get("/", (req, res) => {
             document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); 
             document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); 
           }
+          
+          async function fetchAdminStats() {
+             const res = await api('/api/admin/stats');
+             const data = await res.json();
+             document.getElementById('adminData').innerHTML = \`
+               <div class="admin-stats">
+                 👥 Totalt användare: \${data.totalUsers}<br>
+                 🟢 Aktiva idag: \${data.activeToday}
+               </div>
+             \`;
+          }
+
           async function saveTx(isIncome) { const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value; await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome}); document.getElementById('amt').value=''; update(); showToast("Sparat!"); }
           async function addFixed() { const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value); await api('/api/add-fixed', 'POST', {name, amount}); update(); showToast("Fast utgift tillagd!"); }
           async function action(type, key) { const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value; if(!val) return; const body = {}; body[key] = Number(val); await api('/api/set-'+type, 'POST', body); document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = ''; update(); showToast("Uppdaterat!"); }
