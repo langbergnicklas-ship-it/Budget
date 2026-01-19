@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const cron = require("node-cron");
-const webPush = require("web-push"); // NYTT: Push-motor
+const webPush = require("web-push");
 const app = express();
 
 app.use(cors());
@@ -14,18 +14,17 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
-// --- PUSH-KONFIGURATION (VAPID KEYS) ---
-// Dessa nycklar gör att Google/Apple litar på dina notiser.
+// --- PUSH NOTISER (NYCKLAR) ---
 const publicVapidKey = 'BFs2Ospe7L4i_XccXqvP-qXRYw8wbqCsqVfqMC_NbOoxNb3CcclMvKDOXjNloJVtZoxlHCDX-AAbvbXy8pBOqZ8';
 const privateVapidKey = 'sK8JqG7yShhOqgCgW9O-4meOQcK4v6JKH_hJSiUPyYc';
 
-webPush.setVapidDetails('mailto:exempel@test.com', publicVapidKey, privateVapidKey);
+webPush.setVapidDetails('mailto:test@example.com', publicVapidKey, privateVapidKey);
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
   .catch(err => console.error("DATABASE ERROR:", err));
 
-// --- MEJL-MOTOR (Kvar för välkomstmejl) ---
+// --- MEJL-MOTOR ---
 async function sendEmail(toEmail, subject, html) {
   try {
     if (!process.env.BREVO_API_KEY) return;
@@ -36,7 +35,7 @@ async function sendEmail(toEmail, subject, html) {
   } catch (error) { console.error("Mejlfel:", error); }
 }
 
-// --- SCHEMA (Nu med push-prenumeration) ---
+// --- SCHEMA ---
 const transactionSchema = new mongoose.Schema({ description: String, amount: Number, category: { type: String, default: "Övrigt" }, isIncome: { type: Boolean, default: false }, timestamp: { type: Date, default: Date.now } });
 const userSchema = new mongoose.Schema({ 
   username: { type: String, required: true, unique: true }, 
@@ -53,19 +52,18 @@ const userSchema = new mongoose.Schema({
   streak: { type: Number, default: 0 }, 
   lastActive: { type: Date, default: Date.now }, 
   milestones: { type: [String], default: [] },
-  pushSubscription: { type: Object } // NYTT: Här sparas "adressen" till mobilen
+  pushSubscription: { type: Object }
 });
 const User = mongoose.model("User", userSchema);
 
 // --- AUTOMATISKA NOTISER (CRON) ---
-// Körs varje dag kl 09:00
 cron.schedule("0 9 * * *", async () => {
   console.log("⏰ Kör daglig kontroll...");
   const users = await User.find({});
   const today = new Date();
   
   users.forEach(async (user) => {
-    if (!user.pushSubscription) return; // Inga notiser om man inte aktiverat
+    if (!user.pushSubscription) return; 
 
     let title = "";
     let body = "";
@@ -73,7 +71,7 @@ cron.schedule("0 9 * * *", async () => {
     // 1. LÖNEDAG
     if (today.getDate() === user.targetPayday) {
       title = "Lönedag! 💸";
-      body = "Dags att budgetera! Pengarna har rullat in.";
+      body = "Pengarna har rullat in. Dags att budgetera!";
     }
 
     // 2. INAKTIVITET (3 dagar)
@@ -81,15 +79,14 @@ cron.schedule("0 9 * * *", async () => {
       const diffTime = Math.abs(today - user.lastActive);
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
       if (diffDays === 3) {
-        title = "Du missar din streak! 🔥";
-        body = "Det var 3 dagar sedan du loggade något. Kom tillbaka!";
+        title = "Tappa inte din streak! 🔥";
+        body = "Det var 3 dagar sedan du loggade något.";
       }
     }
 
     if (title) {
       try {
         await webPush.sendNotification(user.pushSubscription, JSON.stringify({ title, body }));
-        console.log("Notis skickad till", user.username);
       } catch (err) { console.error("Kunde inte skicka notis", err); }
     }
   });
@@ -102,25 +99,20 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- PWA & SERVICE WORKER (Motorn för notiser) ---
+// --- PWA ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen", "short_name": "Budget", "start_url": "/", "display": "standalone", "background_color": "#ffffff", "theme_color": "#0084ff",
     "icons": [{ "src": "https://cdn-icons-png.flaticon.com/512/2953/2953363.png", "sizes": "192x192", "type": "image/png" }, { "src": "https://cdn-icons-png.flaticon.com/512/2953/2953363.png", "sizes": "512x512", "type": "image/png" }]
   });
 });
-
-// Här ligger koden som mobilen kör i bakgrunden för att visa notisen
 app.get('/service-worker.js', (req, res) => {
   res.set('Content-Type', 'application/javascript');
   res.send(`
     self.addEventListener('install', (e) => { self.skipWaiting(); });
     self.addEventListener('push', (e) => {
       const data = e.data.json();
-      self.registration.showNotification(data.title, {
-        body: data.body,
-        icon: 'https://cdn-icons-png.flaticon.com/512/2953/2953363.png'
-      });
+      self.registration.showNotification(data.title, { body: data.body, icon: 'https://cdn-icons-png.flaticon.com/512/2953/2953363.png' });
     });
   `);
 });
@@ -140,7 +132,6 @@ app.post("/api/auth", async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Serverfel" }); }
 });
 
-// NYTT: Spara notis-prenumeration
 app.post("/api/subscribe", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   user.pushSubscription = req.body;
@@ -233,15 +224,17 @@ app.get("/", (req, res) => {
       </head>
       <body>
         <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:12px 25px; border-radius:30px; display:none; z-index:1000;">Sparat!</div>
+        
         <div id="loginScreen">
           <div class="card">
             <h2 style="margin-bottom:20px">Budget kollen</h2>
             <input type="text" id="userIn" placeholder="Användarnamn">
             <input type="password" id="passIn" placeholder="Lösenord">
-            <input type="email" id="emailIn" placeholder="E-post (för återställning)">
+            <input type="email" id="emailIn" placeholder="E-post (Viktigt för notiser!)">
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
+
         <div id="mainContent" style="display:none">
           <div id="view-home" class="view active">
             <div class="card">
@@ -271,6 +264,7 @@ app.get("/", (req, res) => {
               <div id="list" style="margin-top: 20px;"></div>
             </div>
           </div>
+
           <div id="view-fixed" class="view">
             <div class="card">
               <h2>Fasta utgifter</h2>
@@ -280,6 +274,7 @@ app.get("/", (req, res) => {
               <div id="fixedList" style="margin-top: 20px;"></div>
             </div>
           </div>
+
           <div id="view-settings" class="view">
             <div class="card">
               <h2>Inställningar</h2>
@@ -340,4 +335,3 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server redo!"));
-// KLART
