@@ -14,11 +14,13 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
-// --- PUSH NOTISER (NYCKLAR) ---
-const publicVapidKey = 'BFs2Ospe7L4i_XccXqvP-qXRYw8wbqCsqVfqMC_NbOoxNb3CcclMvKDOXjNloJVtZoxlHCDX-AAbvbXy8pBOqZ8';
-const privateVapidKey = 'sK8JqG7yShhOqgCgW9O-4meOQcK4v6JKH_hJSiUPyYc';
+// HÄMTA NYCKLAR FRÅN RENDER (Säkert!)
+const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
+const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
 
-webPush.setVapidDetails('mailto:test@example.com', publicVapidKey, privateVapidKey);
+if (publicVapidKey && privateVapidKey) {
+  webPush.setVapidDetails('mailto:test@example.com', publicVapidKey, privateVapidKey);
+}
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("LYCKAD: Ansluten till MongoDB!"))
@@ -148,7 +150,7 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
-  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light" });
+  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY });
 });
 
 app.post("/api/spend", authenticateToken, async (req, res) => {
@@ -302,14 +304,40 @@ app.get("/", (req, res) => {
         </div>
         <script>
           if('serviceWorker' in navigator) navigator.serviceWorker.register('/service-worker.js');
-          let token = localStorage.getItem('budget_token'); if(token) showApp();
-          const publicVapidKey = 'BFs2Ospe7L4i_XccXqvP-qXRYw8wbqCsqVfqMC_NbOoxNb3CcclMvKDOXjNloJVtZoxlHCDX-AAbvbXy8pBOqZ8';
+          let token = localStorage.getItem('budget_token'); 
+          let publicVapidKey = ""; 
+
+          async function initApp() {
+            if(token) await update();
+          }
+          
+          if(token) initApp();
 
           function api(url, method='GET', body=null) { const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } }; if(body) opts.body = JSON.stringify(body); return fetch(url, opts); }
+          
           async function login() { const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value; const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username: u, password: p, email: e }) }); const data = await res.json(); if(res.ok) { localStorage.setItem('budget_token', data.token); token = data.token; showApp(); } else alert(data.error || "Fel!"); }
+          
           function showApp() { document.getElementById('loginScreen').style.display='none'; document.getElementById('mainContent').style.display='block'; update(); }
           function showTab(t) { document.querySelectorAll('.view').forEach(v=>v.classList.remove('active')); document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.getElementById('view-'+t).classList.add('active'); document.getElementById('btn-'+t).classList.add('active'); }
-          async function update() { const res = await api('/api/overview'); if(!res.ok) return logout(); const data = await res.json(); document.body.classList.toggle('dark-mode', data.theme === 'dark'); document.getElementById('daily').innerText = data.dailyLimit + ':-'; document.getElementById('totalSavings').innerText = data.totalSavings; document.getElementById('avgSavings').innerText = data.avgSavings; document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak"; document.getElementById('bar').style.width = data.usedPercent + '%'; document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate; document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join(''); document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); }
+          
+          async function update() { 
+            const res = await api('/api/overview'); 
+            if(!res.ok) return logout(); 
+            const data = await res.json(); 
+            publicVapidKey = data.publicVapidKey; // Hämta nyckeln dynamiskt
+            
+            document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
+            document.getElementById('daily').innerText = data.dailyLimit + ':-'; 
+            document.getElementById('totalSavings').innerText = data.totalSavings; 
+            document.getElementById('avgSavings').innerText = data.avgSavings; 
+            document.getElementById('streakDisplay').innerText = "🔥 " + data.streak + " dagars streak"; 
+            document.getElementById('bar').style.width = data.usedPercent + '%'; 
+            document.getElementById('stats').innerHTML = "Kvar: <b>" + (data.remainingBudget - data.totalFixed) + " kr</b> | Lön: " + data.paydayDate; 
+            document.getElementById('milestonesList').innerHTML = data.milestones.map(m=>'<span class="milestone-tag">🏆 '+m+'</span>').join(''); 
+            document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); 
+            document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); 
+          }
+          
           async function saveTx(isIncome) { const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value; await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome}); document.getElementById('amt').value=''; update(); showToast("Sparat!"); }
           async function addFixed() { const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value); await api('/api/add-fixed', 'POST', {name, amount}); update(); showToast("Fast utgift tillagd!"); }
           async function action(type, key) { const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value; if(!val) return; const body = {}; body[key] = Number(val); await api('/api/set-'+type, 'POST', body); document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = ''; update(); showToast("Uppdaterat!"); }
@@ -320,6 +348,7 @@ app.get("/", (req, res) => {
           async function archive() { if(confirm("Spara månaden?")) { await api('/api/archive-month', 'POST'); update(); } }
           
           async function enableNotifs() {
+            if(!publicVapidKey) return alert("Laddar nycklar... Försök igen om 2 sekunder.");
             const reg = await navigator.serviceWorker.ready;
             const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicVapidKey });
             await api('/api/subscribe', 'POST', sub);
