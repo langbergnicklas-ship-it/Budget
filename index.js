@@ -196,7 +196,7 @@ app.get("/", (req, res) => {
           body.dark-mode { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; --sub: #aaa; --border: #333; --input: #2a2a2a; }
           body { font-family: -apple-system, sans-serif; text-align: center; background: var(--bg); color: var(--text); margin: 0; padding-bottom: 80px; transition: 0.3s; }
           .card { background: var(--card); padding: 25px; border-radius: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); max-width: 400px; margin: 15px auto; overflow: hidden; }
-          h1 { font-size: 50px; margin: 5px 0; color: var(--plus); letter-spacing: -2px; }
+          h1 { font-size: 50px; margin: 5px 0 0 0; color: var(--plus); letter-spacing: -2px; }
           .streak-box { background: #fff3e0; color: #e65100; padding: 5px 15px; border-radius: 20px; font-size: 13px; font-weight: bold; display: inline-block; margin-bottom: 10px; }
           .milestone-tag { background: #f3e5f5; color: #7b1fa2; padding: 4px 10px; border-radius: 8px; font-size: 11px; margin: 2px; display: inline-block; }
           .savings-card { background: #e8f5e9; color: #2e7d32; padding: 12px; border-radius: 15px; font-weight: bold; font-size: 13px; }
@@ -215,6 +215,20 @@ app.get("/", (req, res) => {
           .income-text { color: var(--plus); font-weight: bold; }
           .view { display: none; } .view.active { display: block; }
           #loginScreen { padding-top: 50px; }
+          
+          /* NY STIL FÖR NEDRÄKNINGS-RUTAN */
+          .countdown-badge {
+            background: #f0f2f5; 
+            color: var(--sub); 
+            padding: 8px 15px; 
+            border-radius: 15px; 
+            font-size: 13px; 
+            font-weight: bold; 
+            display: inline-block; 
+            margin-top: 15px; 
+            margin-bottom: 5px;
+          }
+          body.dark-mode .countdown-badge { background: #333; color: #ccc; }
         </style>
       </head>
       <body>
@@ -238,7 +252,10 @@ app.get("/", (req, res) => {
                 <div class="savings-card" style="background:#e3f2fd; color:#1565c0">📈 Snitt/mån<br><span id="avgSavings">0</span> kr</div>
               </div>
               <p style="font-size:11px; font-weight:bold; color:var(--sub)">REKOMMENDERAD DAGSBUDGET</p>
+              
               <h1 id="daily">...</h1>
+              <div id="countdown" class="countdown-badge">...</div>
+              
               <div class="progress-container"><div id="bar" class="progress-bar"></div></div>
               <p id="stats" style="font-size: 13px; color: var(--sub); margin-bottom: 20px;"></p>
               <div class="section">
@@ -300,18 +317,32 @@ app.get("/", (req, res) => {
           let token = localStorage.getItem('budget_token'); 
           let publicVapidKey = ""; 
 
-          async function initApp() {
-            if(token) await update();
+          // HÄR FIXAR VI UTLOGGNINGSPROBLEMET!
+          // Vi visar appen direkt om token finns, så man slipper se login-rutan
+          if (token) {
+             document.getElementById('loginScreen').style.display='none'; 
+             document.getElementById('mainContent').style.display='block';
+             initApp();
           }
-          if(token) initApp();
+
+          async function initApp() {
+            await update();
+          }
 
           function api(url, method='GET', body=null) { const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } }; if(body) opts.body = JSON.stringify(body); return fetch(url, opts); }
           async function login() { const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value; const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username: u, password: p, email: e }) }); const data = await res.json(); if(res.ok) { localStorage.setItem('budget_token', data.token); token = data.token; showApp(); } else alert(data.error || "Fel!"); }
           function showApp() { document.getElementById('loginScreen').style.display='none'; document.getElementById('mainContent').style.display='block'; update(); }
           function showTab(t) { document.querySelectorAll('.view').forEach(v=>v.classList.remove('active')); document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.getElementById('view-'+t).classList.add('active'); document.getElementById('btn-'+t).classList.add('active'); }
+          
           async function update() { 
             const res = await api('/api/overview'); 
-            if(!res.ok) return logout(); 
+            
+            // BARA LOGGA UT OM KONTOT ÄR OGILTIGT (401/403). Inte om servern krånglar.
+            if(!res.ok) {
+                if(res.status === 401 || res.status === 403) return logout();
+                return; // Gör ingenting om det bara är nätfel
+            }
+
             const data = await res.json(); 
             publicVapidKey = data.publicVapidKey;
             
@@ -319,8 +350,8 @@ app.get("/", (req, res) => {
 
             document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
             
-            // HÄR ÄR ÄNDRINGEN (Särar på texten ordentligt)
-            document.getElementById('daily').innerHTML = data.dailyLimit + ':- <div style="font-size:14px; color:var(--sub); font-weight:normal; margin-top:25px; padding-top:10px;">⏳ ' + data.daysLeft + ' dagar till lön</div>';
+            document.getElementById('daily').innerText = data.dailyLimit + ':-';
+            document.getElementById('countdown').innerText = '⏳ ' + data.daysLeft + ' dagar till lön';
             
             document.getElementById('totalSavings').innerText = data.totalSavings; 
             document.getElementById('avgSavings').innerText = data.avgSavings; 
