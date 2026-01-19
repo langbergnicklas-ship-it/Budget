@@ -14,12 +14,19 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
 
-// --- HÄMTA NYCKLAR FRÅN RENDER (SÄKERT) ---
+// SÄKERHETSKONTROLL: Kollar om nycklar finns innan vi startar push
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
 const privateVapidKey = process.env.VAPID_PRIVATE_KEY;
 
 if (publicVapidKey && privateVapidKey) {
-  webPush.setVapidDetails('mailto:test@example.com', publicVapidKey, privateVapidKey);
+  try {
+    webPush.setVapidDetails('mailto:test@example.com', publicVapidKey, privateVapidKey);
+    console.log("✅ Push-notiser aktiverade");
+  } catch (err) {
+    console.log("⚠️ Varning: Kunde inte starta push-motor", err);
+  }
+} else {
+  console.log("ℹ️ Inga VAPID-nycklar hittades. Push-notiser inaktiverade för stunden.");
 }
 
 mongoose.connect(MONGODB_URI)
@@ -58,36 +65,25 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model("User", userSchema);
 
-// --- AUTOMATISKA NOTISER (CRON) ---
+// --- NOTISER (CRON) ---
 cron.schedule("0 9 * * *", async () => {
+  if (!publicVapidKey || !privateVapidKey) return; // Kör ej om nycklar saknas
   console.log("⏰ Kör daglig kontroll...");
   const users = await User.find({});
   const today = new Date();
   
   users.forEach(async (user) => {
     if (!user.pushSubscription) return; 
-
-    let title = "";
-    let body = "";
-
-    if (today.getDate() === user.targetPayday) {
-      title = "Lönedag! 💸";
-      body = "Pengarna har rullat in. Dags att budgetera!";
-    }
-
+    let title = ""; let body = "";
+    if (today.getDate() === user.targetPayday) { title = "Lönedag! 💸"; body = "Pengarna har rullat in. Budgetera smart!"; }
     if (user.lastActive) {
       const diffTime = Math.abs(today - user.lastActive);
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
-      if (diffDays === 3) {
-        title = "Tappa inte din streak! 🔥";
-        body = "Det var 3 dagar sedan du loggade något.";
-      }
+      if (diffDays === 3) { title = "Tappa inte din streak! 🔥"; body = "3 dagar sedan du loggade något."; }
     }
-
-    if (title && publicVapidKey && privateVapidKey) {
-      try {
-        await webPush.sendNotification(user.pushSubscription, JSON.stringify({ title, body }));
-      } catch (err) { console.error("Kunde inte skicka notis", err); }
+    if (title) {
+      try { await webPush.sendNotification(user.pushSubscription, JSON.stringify({ title, body })); } 
+      catch (err) { console.error("Push fel", err); }
     }
   });
 });
@@ -99,7 +95,7 @@ const authenticateToken = (req, res, next) => {
   jwt.verify(token, JWT_SECRET, (err, user) => { if (err) return res.status(403).json({ error: "Ogiltig token" }); req.user = user; next(); });
 };
 
-// --- PWA ---
+// --- PWA & SERVICE WORKER ---
 app.get('/manifest.json', (req, res) => {
   res.json({
     "name": "Budget kollen", "short_name": "Budget", "start_url": "/", "display": "standalone", "background_color": "#ffffff", "theme_color": "#0084ff",
@@ -125,7 +121,7 @@ app.post("/api/auth", async (req, res) => {
     if (!user) {
       const hashedPassword = await bcrypt.hash(password, 10);
       user = await User.create({ username, password: hashedPassword, email, lastActive: new Date() });
-      if (email && process.env.BREVO_API_KEY) sendEmail(email, "Välkommen!", `<h2>Hej ${username}!</h2><p>Konto redo.</p>`);
+      if (email && process.env.BREVO_API_KEY) sendEmail(email, "Välkommen!", \`<h2>Hej \${username}!</h2><p>Konto redo.</p>\`);
     } else { if (!(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Fel lösenord" }); }
     const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, username: user.username });
@@ -134,9 +130,7 @@ app.post("/api/auth", async (req, res) => {
 
 app.post("/api/subscribe", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
-  user.pushSubscription = req.body;
-  await user.save();
-  res.json({ success: true });
+  user.pushSubscription = req.body; await user.save(); res.json({ success: true });
 });
 
 app.get("/api/overview", authenticateToken, async (req, res) => {
@@ -148,7 +142,8 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
   const daysLeft = Math.max(1, Math.ceil((payday - now) / (1000 * 60 * 60 * 24)));
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
-  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY });
+  // Skicka nyckeln BARA om den finns i Render
+  res.json({ dailyLimit: Math.floor((user.remainingBudget - totalFixed) / daysLeft), daysLeft, paydayDate: payday.toLocaleDateString('sv-SE'), remainingBudget: user.remainingBudget, initialBudget: user.initialBudget, totalSavings: user.totalSavings, avgSavings, totalFixed, fixedExpenses: user.fixedExpenses, streak: user.streak || 0, milestones: user.milestones || [], usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), transactions: user.transactions, theme: user.theme || "light", publicVapidKey: process.env.VAPID_PUBLIC_KEY || "" });
 });
 
 app.post("/api/spend", authenticateToken, async (req, res) => {
@@ -169,7 +164,7 @@ app.post("/api/send-summary", authenticateToken, async (req, res) => {
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
     const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo);
     const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0);
-    const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`;
+    const html = \`<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>\${totalSpent} kr</b></p><p>Streak: 🔥 <b>\${user.streak}</b></p>\`;
     await sendEmail(user.email, "Sammanfattning av din vecka!", html);
   }
   res.json({ success: true });
@@ -184,7 +179,7 @@ app.post("/api/archive-month", authenticateToken, async (req, res) => { const us
 app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const tx = user.transactions.id(req.params.id); if (tx) { if (tx.isIncome) user.remainingBudget -= tx.amount; else user.remainingBudget += tx.amount; tx.deleteOne(); await user.save(); } res.json({ success: true }); });
 
 app.get("/", (req, res) => {
-  res.send(`
+  res.send(\`
     <!DOCTYPE html>
     <html lang="sv">
       <head>
@@ -224,7 +219,6 @@ app.get("/", (req, res) => {
       </head>
       <body>
         <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:12px 25px; border-radius:30px; display:none; z-index:1000;">Sparat!</div>
-        
         <div id="loginScreen">
           <div class="card">
             <h2 style="margin-bottom:20px">Budget kollen</h2>
@@ -234,7 +228,6 @@ app.get("/", (req, res) => {
             <button onclick="login()">Logga in / Skapa profil</button>
           </div>
         </div>
-
         <div id="mainContent" style="display:none">
           <div id="view-home" class="view active">
             <div class="card">
@@ -264,7 +257,6 @@ app.get("/", (req, res) => {
               <div id="list" style="margin-top: 20px;"></div>
             </div>
           </div>
-
           <div id="view-fixed" class="view">
             <div class="card">
               <h2>Fasta utgifter</h2>
@@ -274,7 +266,6 @@ app.get("/", (req, res) => {
               <div id="fixedList" style="margin-top: 20px;"></div>
             </div>
           </div>
-
           <div id="view-settings" class="view">
             <div class="card">
               <h2>Inställningar</h2>
@@ -283,7 +274,11 @@ app.get("/", (req, res) => {
                 <button class="affiliate-btn" onclick="window.open('https://www.compricer.se', '_blank')">⚡ Jämför elavtal</button>
                 <button class="affiliate-btn" onclick="window.open('https://buymeacoffee.com/northernsuccess', '_blank')" style="background:#FF813F">☕ Bjud på en kaffe</button>
               </div>
-              <button onclick="enableNotifs()" style="background:#27ae60; margin-bottom:10px;">🔔 Aktivera Push-notiser</button>
+              
+              <div id="pushSection" style="margin-bottom:15px;">
+                <button onclick="enableNotifs()" style="background:#27ae60; margin-bottom:10px;">🔔 Aktivera Push-notiser</button>
+              </div>
+
               <button onclick="sendSummary()" style="background:#f39c12; margin-bottom: 20px;">📧 Veckosummering till mejl</button>
               <button onclick="toggleTheme()" id="themeBtn" style="background:#444; margin-bottom: 20px;">🌙 Mörkt läge</button>
               <input type="number" id="newBudget" placeholder="Ny månadsbudget (kr)">
@@ -308,22 +303,21 @@ app.get("/", (req, res) => {
           async function initApp() {
             if(token) await update();
           }
-          
           if(token) initApp();
 
           function api(url, method='GET', body=null) { const opts = { method, headers: { 'Content-Type': 'application/json', 'Authorization': token } }; if(body) opts.body = JSON.stringify(body); return fetch(url, opts); }
-          
           async function login() { const u = document.getElementById('userIn').value, p = document.getElementById('passIn').value, e = document.getElementById('emailIn').value; const res = await fetch('/api/auth', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ username: u, password: p, email: e }) }); const data = await res.json(); if(res.ok) { localStorage.setItem('budget_token', data.token); token = data.token; showApp(); } else alert(data.error || "Fel!"); }
-          
           function showApp() { document.getElementById('loginScreen').style.display='none'; document.getElementById('mainContent').style.display='block'; update(); }
           function showTab(t) { document.querySelectorAll('.view').forEach(v=>v.classList.remove('active')); document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active')); document.getElementById('view-'+t).classList.add('active'); document.getElementById('btn-'+t).classList.add('active'); }
-          
           async function update() { 
             const res = await api('/api/overview'); 
             if(!res.ok) return logout(); 
             const data = await res.json(); 
             publicVapidKey = data.publicVapidKey;
             
+            // Dölj knappen om nycklar saknas i Render
+            if(!publicVapidKey) document.getElementById('pushSection').style.display = 'none';
+
             document.body.classList.toggle('dark-mode', data.theme === 'dark'); 
             document.getElementById('daily').innerText = data.dailyLimit + ':-'; 
             document.getElementById('totalSavings').innerText = data.totalSavings; 
@@ -335,7 +329,6 @@ app.get("/", (req, res) => {
             document.getElementById('fixedList').innerHTML = data.fixedExpenses.map(f => \`<div class="history-item">\${f.name} (\${f.amount} kr) <button onclick="deleteFixed('\${f._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); 
             document.getElementById('list').innerHTML = data.transactions.slice(-10).reverse().map(t => \`<div class="history-item"><div><span class="cat-tag">\${t.category}</span>\${t.description} (<span class="\${t.isIncome?'income-text':''}">\${t.isIncome?'+':'-'}\${t.amount} kr</span>)</div><button onclick="deleteItem('\${t._id}')" style="background:none;color:red;width:auto;padding:0">✕</button></div>\`).join(''); 
           }
-          
           async function saveTx(isIncome) { const amt = document.getElementById('amt').value, cat = document.getElementById('cat').value, desc = document.getElementById('desc').value; await api('/api/spend', 'POST', {amount:Number(amt), category:cat, description:desc, isIncome}); document.getElementById('amt').value=''; update(); showToast("Sparat!"); }
           async function addFixed() { const name = document.getElementById('fixName').value, amount = Number(document.getElementById('fixAmt').value); await api('/api/add-fixed', 'POST', {name, amount}); update(); showToast("Fast utgift tillagd!"); }
           async function action(type, key) { const val = document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value; if(!val) return; const body = {}; body[key] = Number(val); await api('/api/set-'+type, 'POST', body); document.getElementById(key === 'budget' ? 'newBudget' : 'newPayday').value = ''; update(); showToast("Uppdaterat!"); }
@@ -346,7 +339,7 @@ app.get("/", (req, res) => {
           async function archive() { if(confirm("Spara månaden?")) { await api('/api/archive-month', 'POST'); update(); } }
           
           async function enableNotifs() {
-            if(!publicVapidKey) return alert("Hämtar nycklar... Försök om 2 sekunder.");
+            if(!publicVapidKey) return alert("VAPID-nyckel saknas i Render! Lägg till den i Environment Variables.");
             const reg = await navigator.serviceWorker.ready;
             const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicVapidKey });
             await api('/api/subscribe', 'POST', sub);
