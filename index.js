@@ -13,8 +13,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const JWT_SECRET = process.env.JWT_SECRET || "hemlig_nyckel_budget_kollen";
-
-// Admin-användarnamn (Hårdkodat för säkerhet)
 const ADMIN_USER = "Nicklas6"; 
 
 const publicVapidKey = process.env.VAPID_PUBLIC_KEY;
@@ -93,7 +91,6 @@ const authenticateToken = (req, res, next) => {
 
 // --- API ROUTES ---
 
-// ADMIN STATS ENDPOINT
 app.get("/api/admin/stats", authenticateToken, async (req, res) => {
   if (req.user.username !== ADMIN_USER) return res.status(403).json({ error: "Access denied" });
   
@@ -122,7 +119,23 @@ app.post("/api/auth", async (req, res) => {
     if (!user) {
       const hashedPassword = await bcrypt.hash(password, 10);
       user = await User.create({ username, password: hashedPassword, email, lastActive: new Date(), streak: 1 });
-      if (email && process.env.BREVO_API_KEY) sendEmail(email, "Välkommen!", `<h2>Hej ${username}!</h2>`);
+      
+      // HÄR ÄR MEJL-FIXEN! Nu skickas både användarnamn och lösenord.
+      if (email && process.env.BREVO_API_KEY) {
+        const emailHtml = `
+          <div style="font-family: sans-serif; padding: 20px; color: #333;">
+            <h2 style="color: #0084ff;">Välkommen till Budget kollen! 🚀</h2>
+            <p>Kul att du är igång. Här är dina inloggningsuppgifter:</p>
+            <div style="background: #f0f2f5; padding: 15px; border-radius: 10px; display: inline-block;">
+              <p style="margin: 5px 0;">👤 Användarnamn: <b>${username}</b></p>
+              <p style="margin: 5px 0;">🔑 Lösenord: <b>${password}</b></p>
+            </div>
+            <p>Spara detta mejl eller byt lösenord om du vill vara extra säker.</p>
+            <p>Lycka till med sparandet!<br>/ Budget kollen</p>
+          </div>
+        `;
+        sendEmail(email, "Välkommen! Här är dina uppgifter", emailHtml);
+      }
     } else { if (!(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Fel lösenord" }); }
     const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ success: true, token, username: user.username });
@@ -355,7 +368,6 @@ app.get("/", (req, res) => {
             
             if(!publicVapidKey) document.getElementById('pushSection').style.display = 'none';
             
-            // VISA ADMIN-PANEL OM DET ÄR NICKLAS6
             if(data.username === "Nicklas6") {
                 document.getElementById('adminPanel').style.display = 'block';
             }
