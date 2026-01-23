@@ -39,8 +39,6 @@ async function sendEmail(toEmail, subject, html) {
 }
 
 const transactionSchema = new mongoose.Schema({ description: String, amount: Number, category: { type: String, default: "Övrigt" }, isIncome: { type: Boolean, default: false }, timestamp: { type: Date, default: Date.now } });
-
-// NYTT: Schema för historik
 const historySchema = new mongoose.Schema({ date: String, savedAmount: Number });
 
 const userSchema = new mongoose.Schema({ 
@@ -52,9 +50,9 @@ const userSchema = new mongoose.Schema({
   theme: { type: String, default: "light" }, 
   totalSavings: { type: Number, default: 0 }, 
   monthsArchived: { type: Number, default: 0 },
-  history: [historySchema], // NYTT: Sparar historiken här
+  history: [historySchema], 
   initialBudget: { type: Number, default: 12000 }, 
-  remainingBudget: { type: Number, default: 12000 }, 
+  // remainingBudget tas bort som sparad variabel, vi räknar ut den live istället!
   targetPayday: { type: Number, default: 25 }, 
   fixedExpenses: [{ name: String, amount: Number }], 
   transactions: [transactionSchema], 
@@ -159,57 +157,84 @@ app.post("/api/change-password", authenticateToken, async (req, res) => {
 
 app.post("/api/subscribe", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.pushSubscription = req.body; await user.save(); res.json({ success: true }); });
 
+// NY LOGIK: Räkna ut budget LIVE (Fixar "Uppdatera budget"-buggen)
 app.get("/api/overview", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   const now = new Date(); now.setHours(0, 0, 0, 0); 
   const todayStr = now.toDateString();
   const lastActiveStr = user.lastActive ? user.lastActive.toDateString() : null;
+  
   if (lastActiveStr !== todayStr) {
      const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
      if (user.lastActive && user.lastActive.toDateString() === yesterday.toDateString()) { user.streak = (user.streak || 0) + 1; } else { user.streak = 1; }
      user.lastActive = new Date(); await user.save();
   }
+  
+  // Räkna lönedag
   let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday); payday.setHours(0, 0, 0, 0);
   if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2); else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
   if (now.getTime() > payday.getTime()) { payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday); payday.setHours(0, 0, 0, 0); }
   const diffTime = payday.getTime() - now.getTime();
   const daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+  // LIVE KALKYLATOR
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
+  const totalIncome = user.transactions.filter(t => t.isIncome).reduce((sum, t) => sum + t.amount, 0);
+  const totalSpent = user.transactions.filter(t => !t.isIncome).reduce((sum, t) => sum + t.amount, 0);
+  
+  // Magin: Startbudget + inkomster - utgifter = Verkligt Kvar
+  const currentRemaining = user.initialBudget + totalIncome - totalSpent;
+
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
   
   res.json({ 
-    dailyLimit: Math.floor((user.remainingBudget - totalFixed) / Math.max(1, daysLeft)), 
+    dailyLimit: Math.floor((currentRemaining - totalFixed) / Math.max(1, daysLeft)), 
     daysLeft, 
     paydayDate: payday.toLocaleDateString('sv-SE'), 
-    remainingBudget: user.remainingBudget, 
+    remainingBudget: currentRemaining, // Skickar den uträknade summan
     initialBudget: user.initialBudget, 
     totalSavings: user.totalSavings, 
     avgSavings, 
     totalFixed, 
     fixedExpenses: user.fixedExpenses, 
     streak: user.streak || 1, 
-    usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - user.remainingBudget) / user.initialBudget) * 100)), 
+    usedPercent: Math.min(100, Math.max(0, ((user.initialBudget - currentRemaining) / user.initialBudget) * 100)), 
     transactions: user.transactions, 
-    history: user.history || [], // Skicka med historiken till frontend
+    history: user.history || [],
     theme: user.theme || "light", 
     publicVapidKey: process.env.VAPID_PUBLIC_KEY || "", 
     username: user.username 
   });
 });
 
-app.post("/api/spend", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const amount = Number(req.body.amount); if (req.body.isIncome) user.remainingBudget += amount; else user.remainingBudget -= amount; user.transactions.push(req.body); await user.save(); res.json({ success: true }); });
+app.post("/api/spend", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.transactions.push(req.body); await user.save(); res.json({ success: true }); });
+
+// FIX: Uppdaterar bara startbudgeten, raderar INTE köpen!
+app.post("/api/set-budget", authenticateToken, async (req, res) => { 
+  const user = await User.findById(req.user.id); 
+  user.initialBudget = req.body.budget; 
+  // Vi rör inte transaktionerna, så räknas allt om automatiskt!
+  await user.save(); 
+  res.json({ success: true }); 
+});
+
 app.post("/api/send-summary", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); if (user.email) { const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7); const weeklyTx = user.transactions.filter(t => t.timestamp > weekAgo); const totalSpent = weeklyTx.reduce((sum, t) => sum + (t.isIncome ? 0 : t.amount), 0); const html = `<h2>Budget kollen: Veckosummering 📊</h2><p>Spenderat: <b>${totalSpent} kr</b></p><p>Streak: 🔥 <b>${user.streak}</b></p>`; await sendEmail(user.email, "Sammanfattning av din vecka!", html); } res.json({ success: true }); });
 app.post("/api/add-fixed", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.fixedExpenses.push(req.body); await user.save(); res.json({ success: true }); });
 app.delete("/api/delete-fixed/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.fixedExpenses.pull(req.params.id); await user.save(); res.json({ success: true }); });
 app.post("/api/set-theme", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.theme = req.body.theme; await user.save(); res.json({ success: true }); });
-app.post("/api/set-budget", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.initialBudget = req.body.budget; user.remainingBudget = req.body.budget; user.transactions = []; await user.save(); res.json({ success: true }); });
 app.post("/api/set-payday", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.targetPayday = req.body.payday; await user.save(); res.json({ success: true }); });
 
-// UPPDATERAD: Sparar nu till history-listan
+// UPPDATERAD: Sparar nu till history-listan korrekt
 app.post("/api/archive-month", authenticateToken, async (req, res) => { 
   const user = await User.findById(req.user.id);
+  
+  // Räkna ut vad som finns kvar just nu
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
-  const savedThisMonth = user.remainingBudget - totalFixed; // Vad som faktiskt blev över
+  const totalIncome = user.transactions.filter(t => t.isIncome).reduce((sum, t) => sum + t.amount, 0);
+  const totalSpent = user.transactions.filter(t => !t.isIncome).reduce((sum, t) => sum + t.amount, 0);
+  const currentRemaining = user.initialBudget + totalIncome - totalSpent;
+  
+  const savedThisMonth = currentRemaining - totalFixed; 
 
   user.totalSavings += savedThisMonth; 
   user.monthsArchived += 1; 
@@ -218,13 +243,13 @@ app.post("/api/archive-month", authenticateToken, async (req, res) => {
   const dateStr = new Date().toLocaleDateString('sv-SE', { year: 'numeric', month: 'long' });
   user.history.push({ date: dateStr, savedAmount: savedThisMonth });
 
-  user.remainingBudget = user.initialBudget; 
+  // Återställ inför nästa månad (behåll fixed expenses)
   user.transactions = []; 
   await user.save(); 
   res.json({ success: true }); 
 });
 
-app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const tx = user.transactions.id(req.params.id); if (tx) { if (tx.isIncome) user.remainingBudget -= tx.amount; else user.remainingBudget += tx.amount; tx.deleteOne(); await user.save(); } res.json({ success: true }); });
+app.delete("/api/delete-transaction/:id", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); const tx = user.transactions.id(req.params.id); if (tx) { tx.deleteOne(); await user.save(); } res.json({ success: true }); });
 
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html><html lang="sv"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0"><title>Budget kollen</title><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0084ff"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2953/2953363.png"><style>:root{--bg:#f0f2f5;--card:white;--text:#333;--sub:#666;--border:#eee;--input:#f9f9f9;--primary:#0084ff;--plus:#2ecc71}body.dark-mode{--bg:#121212;--card:#1e1e1e;--text:#e0e0e0;--sub:#aaa;--border:#333;--input:#2a2a2a}body{font-family:-apple-system,sans-serif;text-align:center;background:var(--bg);color:var(--text);margin:0;padding-bottom:80px;transition:0.3s}.card{background:var(--card);padding:25px;border-radius:25px;box-shadow:0 4px 15px rgba(0,0,0,0.05);max-width:400px;margin:15px auto;overflow:hidden}h1{font-size:50px;margin:5px 0 0 0;color:var(--plus);letter-spacing:-2px}.streak-box{background:#fff3e0;color:#e65100;padding:5px 15px;border-radius:20px;font-size:13px;font-weight:bold;display:inline-block;margin-bottom:10px}.savings-card{background:#e8f5e9;color:#2e7d32;padding:12px;border-radius:15px;font-weight:bold;font-size:13px}.progress-container{background:var(--border);border-radius:10px;height:10px;margin:15px 0;overflow:hidden}.progress-bar{height:100%;width:0%;transition:width 0.5s ease;background:var(--plus)}input,select{padding:15px;border:1px solid var(--border);border-radius:12px;width:100%;margin-bottom:10px;box-sizing:border-box;font-size:16px;background:var(--input);color:var(--text)}.btn-group{display:grid;grid-template-columns:1fr 1fr;gap:10px}button{padding:15px;background:var(--primary);color:white;border:none;border-radius:12px;font-weight:bold;width:100%;cursor:pointer}button.plus-btn{background:var(--plus)}button.affiliate-btn{background:#8e44ad;color:white;margin-bottom:8px}.tab-bar{position:fixed;bottom:0;left:0;right:0;background:var(--card);display:flex;border-top:1px solid var(--border);padding:10px 0;z-index:999}.tab-btn{flex:1;background:none;color:var(--sub);border:none;font-size:12px;font-weight:bold}.tab-btn.active{color:var(--primary)}.history-item{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--border);text-align:left;font-size:14px}.cat-tag{font-size:10px;background:var(--border);padding:2px 6px;border-radius:4px;color:var(--sub);margin-right:5px}.income-text{color:var(--plus);font-weight:bold}.view{display:none}.view.active{display:block}#loginScreen{padding-top:50px}.countdown-badge{background:#f0f2f5;color:var(--sub);padding:8px 15px;border-radius:15px;font-size:13px;font-weight:bold;display:inline-block;margin-top:15px;margin-bottom:5px}body.dark-mode .countdown-badge{background:#333;color:#ccc}.gdpr-text{font-size:10px;color:#aaa;margin-top:30px;line-height:1.4}#adminPanel{display:none;margin-top:20px;border-top:1px solid var(--border);padding-top:20px}.admin-stats{background:#333;color:gold;padding:15px;border-radius:15px;margin-bottom:10px;border:1px solid gold;font-family:monospace}.link{color:var(--primary);font-size:12px;text-decoration:underline;cursor:pointer;margin-top:10px;display:block}#historyView{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg);z-index:2000;padding:20px;overflow-y:auto}.close-btn{float:right;font-size:24px;cursor:pointer}</style></head>
