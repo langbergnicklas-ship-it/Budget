@@ -39,9 +39,7 @@ async function sendEmail(toEmail, subject, html) {
 }
 
 const transactionSchema = new mongoose.Schema({ description: String, amount: Number, category: { type: String, default: "Övrigt" }, isIncome: { type: Boolean, default: false }, timestamp: { type: Date, default: Date.now } });
-// NYTT: Historik sparar nu vad man spenderat, inte sparat
 const historySchema = new mongoose.Schema({ date: String, totalSpent: Number, income: Number });
-// NYTT: Sparmål
 const goalSchema = new mongoose.Schema({ name: String, target: Number, saved: Number });
 
 const userSchema = new mongoose.Schema({ 
@@ -52,10 +50,10 @@ const userSchema = new mongoose.Schema({
   resetCodeExpires: Date,
   theme: { type: String, default: "light" }, 
   totalSavings: { type: Number, default: 0 }, 
-  lastSavedAmount: { type: Number, default: 0 }, // För prognos
+  lastSavedAmount: { type: Number, default: 0 }, 
   monthsArchived: { type: Number, default: 0 },
   history: [historySchema], 
-  savingsGoals: [goalSchema], // Lista med mål
+  savingsGoals: [goalSchema], 
   initialBudget: { type: Number, default: 12000 }, 
   targetPayday: { type: Number, default: 25 }, 
   fixedExpenses: [{ name: String, amount: Number }], 
@@ -188,8 +186,6 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
   const totalSpent = user.transactions.filter(t => !t.isIncome).reduce((sum, t) => sum + t.amount, 0);
   const currentRemaining = user.initialBudget + totalIncome - totalSpent;
   
-  // Vi beräknar inte längre automatiskt sparande här
-  
   res.json({ 
     dailyLimit: Math.floor((currentRemaining - totalFixed) / Math.max(1, daysLeft)), 
     daysLeft, 
@@ -213,17 +209,16 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
 
 app.post("/api/spend", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.transactions.push(req.body); await user.save(); res.json({ success: true }); });
 
-// NYA API:er för Manuellt Sparande och Mål
+// NYTT: Hanterar både insättning (positivt) och uttag (negativt)
 app.post("/api/add-savings", authenticateToken, async (req, res) => { 
   const user = await User.findById(req.user.id);
   const amount = Number(req.body.amount);
   user.totalSavings += amount;
-  user.lastSavedAmount = amount; // Spara senaste belopp för prognos
+  if(amount > 0) user.lastSavedAmount = amount; 
   
-  // Fördela sparande till mål (valfritt, vi lägger bara till i "saved" för första målet som inte är klart, eller låter user styra - vi gör det enkelt: Allt går till total, målen är visuella)
-  // Men för att visa staplar kan vi öka "saved" på första målet:
+  // Lägg bara till på målen om det är en insättning
   let remainingToAdd = amount;
-  if(user.savingsGoals){
+  if(user.savingsGoals && amount > 0){
       user.savingsGoals.forEach(g => {
           if(remainingToAdd > 0 && g.saved < g.target) {
               const space = g.target - g.saved;
@@ -259,18 +254,15 @@ app.delete("/api/delete-fixed/:id", authenticateToken, async (req, res) => { con
 app.post("/api/set-theme", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.theme = req.body.theme; await user.save(); res.json({ success: true }); });
 app.post("/api/set-payday", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.targetPayday = req.body.payday; await user.save(); res.json({ success: true }); });
 
-// UPPDATERAD: Avsluta månad (Arkivera BARA historik, rör inte sparande)
 app.post("/api/archive-month", authenticateToken, async (req, res) => { 
   const user = await User.findById(req.user.id);
   const totalIncome = user.transactions.filter(t => t.isIncome).reduce((sum, t) => sum + t.amount, 0);
   const totalSpent = user.transactions.filter(t => !t.isIncome).reduce((sum, t) => sum + t.amount, 0);
   
-  // Spara historik (Datum + Totalt spenderat + Inkomster)
   const dateStr = new Date().toLocaleDateString('sv-SE', { year: 'numeric', month: 'long' });
   user.history.push({ date: dateStr, totalSpent: totalSpent, income: totalIncome });
   user.monthsArchived += 1;
 
-  // Rensa transaktioner men rör INTE totalSavings eller initialBudget
   user.transactions = []; 
   await user.save(); 
   res.json({ success: true }); 
@@ -319,9 +311,12 @@ app.get("/", (req, res) => {
         <div class="card">
           <h3 style="margin:0">Totalt på kontot</h3>
           <h1 id="savingsTotalView" style="color:#2ecc71;margin:10px 0">0 kr</h1>
-          <p style="font-size:12px;color:#666;margin-bottom:15px">Sätt in pengar manuellt här när du fört över till ditt sparkonto.</p>
+          <p style="font-size:12px;color:#666;margin-bottom:15px">Justera manuellt</p>
           <input type="number" id="manualSaveAmt" placeholder="Belopp (t.ex. 2000)">
-          <button onclick="addManualSavings()" style="background:#2ecc71">Sätt in på spar</button>
+          <div class="btn-group">
+            <button onclick="addManualSavings(1)" style="background:#2ecc71">Sätt in (+)</button>
+            <button onclick="addManualSavings(-1)" style="background:#e74c3c">Ta ut / Korrigera (-)</button>
+          </div>
         </div>
 
         <h3>🎯 Mina Mål</h3>
@@ -371,14 +366,17 @@ app.get("/", (req, res) => {
             }).join('');
         }
 
-        async function addManualSavings(){
-            const amt = document.getElementById('manualSaveAmt').value;
-            if(!amt) return;
-            await api('/api/add-savings','POST',{amount:Number(amt)});
-            document.getElementById('manualSaveAmt').value='';
+        async function addManualSavings(multiplier){
+            const input = document.getElementById('manualSaveAmt');
+            const val = input.value;
+            if(!val) return;
+            const finalAmt = Number(val) * multiplier; // Gör beloppet negativt om man klickar på röda knappen
+            
+            await api('/api/add-savings','POST',{amount:finalAmt});
+            input.value='';
             await update();
-            renderGoals(); // Uppdatera målen direkt
-            showToast("Sparat & Uppdaterat!");
+            renderGoals(); 
+            showToast(multiplier > 0 ? "Sparat!" : "Korrigerat!");
         }
 
         async function addGoal(){
@@ -416,7 +414,6 @@ app.get("/", (req, res) => {
             document.getElementById('totalSavings').innerText=data.totalSavings;
             document.getElementById('savingsTotalView').innerText=data.totalSavings + " kr";
             
-            // Prognos-text
             if(lastSaved > 0) document.getElementById('prognosisText').innerText = "Sparar ca " + lastSaved + " kr/mån";
             else document.getElementById('prognosisText').innerText = "Ingen prognos";
 
