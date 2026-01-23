@@ -52,7 +52,6 @@ const userSchema = new mongoose.Schema({
   monthsArchived: { type: Number, default: 0 },
   history: [historySchema], 
   initialBudget: { type: Number, default: 12000 }, 
-  // remainingBudget tas bort som sparad variabel, vi räknar ut den live istället!
   targetPayday: { type: Number, default: 25 }, 
   fixedExpenses: [{ name: String, amount: Number }], 
   transactions: [transactionSchema], 
@@ -104,7 +103,7 @@ app.get('/service-worker.js', (req, res) => {
   res.send(`self.addEventListener('install', (e) => { self.skipWaiting(); }); self.addEventListener('push', (e) => { const data = e.data.json(); self.registration.showNotification(data.title, { body: data.body, icon: 'https://cdn-icons-png.flaticon.com/512/2953/2953363.png' }); });`);
 });
 
-// --- AUTH & RESET ---
+// --- AUTH ---
 app.post("/api/auth", async (req, res) => {
   try {
     const { username, password, email } = req.body;
@@ -144,7 +143,6 @@ app.post("/api/reset-password-code", async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Fel." }); }
 });
 
-// --- STANDARD ROUTES ---
 app.post("/api/change-password", authenticateToken, async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body;
@@ -157,41 +155,48 @@ app.post("/api/change-password", authenticateToken, async (req, res) => {
 
 app.post("/api/subscribe", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.pushSubscription = req.body; await user.save(); res.json({ success: true }); });
 
-// NY LOGIK: Räkna ut budget LIVE (Fixar "Uppdatera budget"-buggen)
+// --- MAIN LOGIC ---
 app.get("/api/overview", authenticateToken, async (req, res) => {
   const user = await User.findById(req.user.id);
   const now = new Date(); now.setHours(0, 0, 0, 0); 
   const todayStr = now.toDateString();
-  const lastActiveStr = user.lastActive ? user.lastActive.toDateString() : null;
   
-  if (lastActiveStr !== todayStr) {
+  // Streak Logic
+  if (user.lastActive && user.lastActive.toDateString() !== todayStr) {
      const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
-     if (user.lastActive && user.lastActive.toDateString() === yesterday.toDateString()) { user.streak = (user.streak || 0) + 1; } else { user.streak = 1; }
+     if (user.lastActive.toDateString() === yesterday.toDateString()) { user.streak = (user.streak || 0) + 1; } else { user.streak = 1; }
      user.lastActive = new Date(); await user.save();
-  }
+  } else if (!user.lastActive) { user.lastActive = new Date(); await user.save(); }
+
+  // PAYDAY LOGIC (Fixad för dag 0)
+  let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday); 
+  payday.setHours(0, 0, 0, 0);
   
-  // Räkna lönedag
-  let payday = new Date(now.getFullYear(), now.getMonth(), user.targetPayday); payday.setHours(0, 0, 0, 0);
-  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2); else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
-  if (now.getTime() > payday.getTime()) { payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday); payday.setHours(0, 0, 0, 0); }
+  // Helgjustering
+  if (payday.getDay() === 0) payday.setDate(payday.getDate() - 2); 
+  else if (payday.getDay() === 6) payday.setDate(payday.getDate() - 1);
+
+  // FIX: Om idag ÄR lönedag (eller passerat), sikta på nästa månad direkt!
+  if (now.getTime() >= payday.getTime()) { 
+      payday = new Date(now.getFullYear(), now.getMonth() + 1, user.targetPayday); 
+      payday.setHours(0, 0, 0, 0);
+  }
+
   const diffTime = payday.getTime() - now.getTime();
   const daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-  // LIVE KALKYLATOR
+  // LIVE Budget Calculation
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const totalIncome = user.transactions.filter(t => t.isIncome).reduce((sum, t) => sum + t.amount, 0);
   const totalSpent = user.transactions.filter(t => !t.isIncome).reduce((sum, t) => sum + t.amount, 0);
-  
-  // Magin: Startbudget + inkomster - utgifter = Verkligt Kvar
   const currentRemaining = user.initialBudget + totalIncome - totalSpent;
-
   const avgSavings = user.monthsArchived > 0 ? Math.floor(user.totalSavings / user.monthsArchived) : 0;
   
   res.json({ 
     dailyLimit: Math.floor((currentRemaining - totalFixed) / Math.max(1, daysLeft)), 
     daysLeft, 
     paydayDate: payday.toLocaleDateString('sv-SE'), 
-    remainingBudget: currentRemaining, // Skickar den uträknade summan
+    remainingBudget: currentRemaining, 
     initialBudget: user.initialBudget, 
     totalSavings: user.totalSavings, 
     avgSavings, 
@@ -209,11 +214,9 @@ app.get("/api/overview", authenticateToken, async (req, res) => {
 
 app.post("/api/spend", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.transactions.push(req.body); await user.save(); res.json({ success: true }); });
 
-// FIX: Uppdaterar bara startbudgeten, raderar INTE köpen!
 app.post("/api/set-budget", authenticateToken, async (req, res) => { 
   const user = await User.findById(req.user.id); 
   user.initialBudget = req.body.budget; 
-  // Vi rör inte transaktionerna, så räknas allt om automatiskt!
   await user.save(); 
   res.json({ success: true }); 
 });
@@ -224,26 +227,18 @@ app.delete("/api/delete-fixed/:id", authenticateToken, async (req, res) => { con
 app.post("/api/set-theme", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.theme = req.body.theme; await user.save(); res.json({ success: true }); });
 app.post("/api/set-payday", authenticateToken, async (req, res) => { const user = await User.findById(req.user.id); user.targetPayday = req.body.payday; await user.save(); res.json({ success: true }); });
 
-// UPPDATERAD: Sparar nu till history-listan korrekt
 app.post("/api/archive-month", authenticateToken, async (req, res) => { 
   const user = await User.findById(req.user.id);
-  
-  // Räkna ut vad som finns kvar just nu
   const totalFixed = user.fixedExpenses.reduce((sum, exp) => sum + exp.amount, 0);
   const totalIncome = user.transactions.filter(t => t.isIncome).reduce((sum, t) => sum + t.amount, 0);
   const totalSpent = user.transactions.filter(t => !t.isIncome).reduce((sum, t) => sum + t.amount, 0);
   const currentRemaining = user.initialBudget + totalIncome - totalSpent;
-  
   const savedThisMonth = currentRemaining - totalFixed; 
 
   user.totalSavings += savedThisMonth; 
   user.monthsArchived += 1; 
-  
-  // Spara historik
   const dateStr = new Date().toLocaleDateString('sv-SE', { year: 'numeric', month: 'long' });
   user.history.push({ date: dateStr, savedAmount: savedThisMonth });
-
-  // Återställ inför nästa månad (behåll fixed expenses)
   user.transactions = []; 
   await user.save(); 
   res.json({ success: true }); 
