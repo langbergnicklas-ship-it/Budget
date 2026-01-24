@@ -370,7 +370,7 @@ app.get("/", (req, res) => {
             const input = document.getElementById('manualSaveAmt');
             const val = input.value;
             if(!val) return;
-            const finalAmt = Number(val) * multiplier; // Gör beloppet negativt om man klickar på röda knappen
+            const finalAmt = Number(val) * multiplier; 
             
             await api('/api/add-savings','POST',{amount:finalAmt});
             input.value='';
